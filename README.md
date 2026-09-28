@@ -1,6 +1,8 @@
 # IETT route export API
 
-This service discovers official IETT route variants and converts their geometry into Google Maps and Apple Maps driving-directions URLs. It does not call a maps API or any external routing service.
+This service converts official IETT route geometry into Google Maps and Apple Maps driving directions.
+
+It uses IETT route geometry and stop data directly. It does not call the Google Maps API, Apple MapKit, or another routing service.
 
 ## Run
 
@@ -9,43 +11,23 @@ npm install
 npm start
 ```
 
-The server listens on port `3000` by default. `PORT` and `HOST` can override the listener settings.
+The server listens on port `3000` by default.
 
-## Project structure
+## Example
 
-```text
-src/
-  clients/      IETT HTTP client and caches
-  providers/    Google Maps and Apple Maps URL builders
-  routing/      Geometry and waypoint selection
-  services/     Route discovery and route-building workflow
-  shared/       Errors and input validation
-  app.js        Express routes
-  index.js      Public library exports
-  server.js     HTTP server entrypoint
-```
-
-Run the complete `256` discovery and selection example with:
+Run route discovery and URL generation for IETT line `256`:
 
 ```bash
 npm run example
 ```
 
-To demonstrate an already-on-the-bus origin, provide coordinates from the selected route:
-
-```bash
-CURRENT_LAT=40.99 CURRENT_LNG=29.13 npm run example
-```
-
-## Discover a line
+## Options of a line
 
 ```bash
 curl http://localhost:3000/api/iett/lines/256/options
 ```
 
-Discovery follows the IETT RouteDetail page. It constructs and validates the two standard codes, `<line>_G_D0` and `<line>_D_D0`, then uses `GetAllRoute` for additional or depar variants. No additional variant code is invented.
-
-Routes are grouped by their actual first and last stop names. An empty `GetAllRoute` response is valid and still returns any validated standard directions.
+The service constructs and validates the two standard route codes, `<line>_G_D0` and `<line>_D_D0`, then uses `GetAllRoute` to discover additional or depar variants.
 
 ## Build a Google Maps URL
 
@@ -55,21 +37,45 @@ curl -X POST http://localhost:3000/api/iett/routes/256_G_D0/google-maps \
   -d '{"maxWaypoints":9,"debug":false}'
 ```
 
-For a rider who is already on the bus, include the current location. The service keeps the exact coordinate as the origin and optimizes only the remaining route.
+Google Maps supports up to 9 intermediate waypoints.
 
-```bash
-curl -X POST http://localhost:3000/api/iett/routes/256_G_D0/google-maps \
-  -H 'content-type: application/json' \
-  -d '{"currentLocation":{"lat":41.0,"lng":29.0}}'
+### Sample output
+
+```json
+{
+  "routeCode": "256_G_D0",
+  "provider": "google-maps",
+  "origin": {
+    "lat": 40.9745340005498,
+    "lng": 29.1539319999923
+  },
+  "originSource": "route-start",
+  "destination": {
+    "lat": 41.0391480005601,
+    "lng": 28.9888429999892
+  },
+  "waypoints": [
+    {
+      "lat": 40.9824190005511,
+      "lng": 29.1656109999925,
+      "reason": "station",
+      "stationName": "ÜSKÜDAR CADDESİ",
+      "stationIndex": 3
+    },
+    ...
+  ],
+  "routeLengthMeters": 30154.34,
+  "startDistanceAlongRoute": 0,
+  "remainingRouteLengthMeters": 30154.34,
+  "stationCount": 47,
+  "stationWaypointCount": 9,
+  "originalPointCount": 838,
+  "resampledPointCount": 1007,
+  "url": "https://www.google.com/maps/dir/?api=1&origin=40.9745340005498%2C29.1539319999923&destination=41.0391480005601%2C28.9888429999892&travelmode=driving&waypoints=..."
+}
 ```
 
-Intermediate IETT stops are the first waypoint candidates. The service uses their exact coordinates and chooses the set that best constrains the complete stop corridor. Turn and geometry candidates are used only when waypoint capacity remains.
-
-Google Maps directions URLs cannot force more intermediate locations than `maxWaypoints`. A route with more stops than that can be strongly constrained by representative stops, but every stop cannot be made an explicit waypoint in one URL.
-
 ## Build an Apple Maps URL
-
-Apple Maps supports up to 13 intermediate waypoints in this service, allowing four more IETT stops to be constrained than the Google Maps output.
 
 ```bash
 curl -X POST http://localhost:3000/api/iett/routes/256_G_D0/apple-maps \
@@ -77,11 +83,47 @@ curl -X POST http://localhost:3000/api/iett/routes/256_G_D0/apple-maps \
   -d '{"maxWaypoints":13,"debug":false}'
 ```
 
-The response uses the unified Apple Maps URL format with repeated `waypoint` parameters. Current-location and debug options work the same way as the Google Maps endpoint.
+Apple Maps supports up to 13 intermediate waypoints in this service.
+
+### Sample output
+
+```json
+{
+  "routeCode": "256_G_D0",
+  "provider": "apple-maps",
+  "origin": {
+    "lat": 40.9745340005498,
+    "lng": 29.1539319999923
+  },
+  "originSource": "route-start",
+  "destination": {
+    "lat": 41.0391480005601,
+    "lng": 28.9888429999892
+  },
+  "waypoints": [
+    {
+      "lat": 40.9824190005511,
+      "lng": 29.1656109999925,
+      "reason": "station",
+      "stationName": "ÜSKÜDAR CADDESİ",
+      "stationIndex": 3
+    },
+    ...
+  ],
+  "routeLengthMeters": 30154.34,
+  "startDistanceAlongRoute": 0,
+  "remainingRouteLengthMeters": 30154.34,
+  "stationCount": 47,
+  "stationWaypointCount": 13,
+  "originalPointCount": 838,
+  "resampledPointCount": 1007,
+  "url": "https://maps.apple.com/directions?source=40.9745340005498%2C29.1539319999923&destination=41.0391480005601%2C28.9888429999892&mode=driving&waypoint=..."
+}
+```
 
 ## Start from a bus stop
 
-Both map providers can start at a named stop. Matching ignores case and Turkish diacritics. Stops and route geometry before the selected station are removed from waypoint selection.
+Both map providers can start directions from a specific IETT stop.
 
 ```bash
 curl -X POST http://localhost:3000/api/iett/routes/256_D_D0/apple-maps \
@@ -89,7 +131,52 @@ curl -X POST http://localhost:3000/api/iett/routes/256_D_D0/apple-maps \
   -d '{"startStation":"KÖPRÜLÜ KAVŞAK"}'
 ```
 
-The same body works with the `/google-maps` endpoint. `startStation` and `currentLocation` cannot be supplied together.
+The response identifies the resolved stop and uses its exact IETT coordinate as the origin:
+
+```json
+{
+  "originSource": "station",
+  "startStation": {
+    "name": "KÖPRÜLÜ KAVŞAK",
+    "index": 11
+  },
+  "origin": {
+    "lat": 41.0663270005644,
+    "lng": 29.0116029999897
+  },
+  "startDistanceAlongRoute": 4862.366010391871
+}
+```
+
+## Already on the bus
+
+If the rider is already on the bus, provide their current location instead of a start station.
+
+The service keeps the current coordinate as the route origin, removes the traveled portion and optimizes waypoints only for the remaining route.
+
+```bash
+curl -X POST http://localhost:3000/api/iett/routes/256_G_D0/google-maps \
+  -H 'content-type: application/json' \
+  -d '{"currentLocation":{"lat":41.0,"lng":29.0}}'
+```
+
+To demonstrate this behavior with the example script, provide coordinates from the selected route:
+
+```bash
+CURRENT_LAT=40.99 CURRENT_LNG=29.13 npm run example
+```
+
+`startStation` and `currentLocation` cannot be supplied together.
+
+## Debug mode
+
+Set `debug` to `true` to include waypoint candidates, component scores, selection status, adaptive spacing, and route-deviation metrics.
+
+```json
+{
+  "debug": true
+}
+```
 
 ## Library use
 
@@ -101,18 +188,27 @@ import {
 } from "./src/index.js";
 
 const options = await getIettRouteOptions("256");
-const variants = options.directions.flatMap(direction => direction.variants);
-const selected = variants.find(variant => variant.code === "256_G_D0");
+
+const variants = options.directions.flatMap(
+  direction => direction.variants
+);
+
+const selected = variants.find(
+  variant => variant.code === "256_G_D0"
+);
 
 if (selected) {
-  const result = await buildIettGoogleMapsRoute(selected.code, {
+  const googleResult = await buildIettGoogleMapsRoute(selected.code, {
     maxWaypoints: 9,
     debug: true
   });
 
-  console.log(result.url);
+  console.log(googleResult.url);
 
-  const appleResult = await buildIettAppleMapsRoute(selected.code);
+  const appleResult = await buildIettAppleMapsRoute(selected.code, {
+    maxWaypoints: 13
+  });
+
   console.log(appleResult.url);
 }
 ```
