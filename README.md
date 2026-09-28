@@ -2,8 +2,6 @@
 
 This service converts official IETT route geometry into Google Maps and Apple Maps driving directions.
 
-It uses IETT route geometry and stop data directly. It does not call the Google Maps API, Apple MapKit, or another routing service.
-
 ## Run
 
 ```bash
