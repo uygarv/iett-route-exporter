@@ -8,7 +8,10 @@ import {
 const TURN_WINDOW_METERS = 80;
 const TURN_SHIFT_METERS = 110;
 const CANDIDATE_MERGE_METERS = 60;
-const MIN_SIGNIFICANCE = 0.32;
+const STATION_TURN_ASSOCIATION_METERS = 200;
+const STATION_PREFERENCE_RATIO = 0.8;
+const MAX_ACCEPTABLE_DEVIATION_METERS = 75;
+const P95_ACCEPTABLE_DEVIATION_METERS = 30;
 const RESAMPLE_SPACING_METERS = 30;
 
 function bearing(first, second, projector) {
@@ -29,9 +32,35 @@ function turnAngleAt(geometry, distance) {
 }
 
 function addCandidate(candidates, incoming) {
-  const existing = candidates.find(candidate => {
-    return Math.abs(candidate.distanceAlongRoute - incoming.distanceAlongRoute) < CANDIDATE_MERGE_METERS;
-  });
+  const incomingIsStation = incoming.reasons.includes("station");
+  let existing = null;
+
+  if (!incomingIsStation && incoming.reasons.includes("post-turn")) {
+    existing = candidates
+      .filter(candidate => candidate.reasons.has("station"))
+      .filter(candidate => {
+        return candidate.distanceAlongRoute >= incoming.turnSourceDistance - 30
+          && candidate.distanceAlongRoute
+            <= incoming.turnSourceDistance + STATION_TURN_ASSOCIATION_METERS;
+      })
+      .sort((first, second) => {
+        return Math.abs(first.distanceAlongRoute - incoming.distanceAlongRoute)
+          - Math.abs(second.distanceAlongRoute - incoming.distanceAlongRoute);
+      })[0] ?? null;
+  }
+
+  if (!existing) {
+    existing = candidates.find(candidate => {
+      const existingIsStation = candidate.reasons.has("station");
+
+      if (incomingIsStation && existingIsStation) {
+        return false;
+      }
+
+      return Math.abs(candidate.distanceAlongRoute - incoming.distanceAlongRoute)
+        < CANDIDATE_MERGE_METERS;
+    });
+  }
 
   if (!existing) {
     candidates.push({
@@ -53,6 +82,8 @@ function addCandidate(candidates, incoming) {
     existing.distanceAlongRoute = incoming.distanceAlongRoute;
     existing.stationName = incoming.stationName;
     existing.stationIndex = incoming.stationIndex;
+    existing.distanceToRoute = incoming.distanceToRoute;
+    existing.projectedToRoute = incoming.projectedToRoute;
   }
 
   if (incoming.turnAngle > existing.turnAngle) {
@@ -67,11 +98,11 @@ function addCandidate(candidates, incoming) {
   }
 }
 
-function buildCandidates(geometry, samples, startDistance, stationConstraints) {
+function buildCandidates(geometry, samples, startDistance, endDistance, stationConstraints) {
   const candidates = [];
   const angles = samples.map(sample => {
     const insideTurnWindow = sample.distanceAlongRoute >= startDistance + TURN_WINDOW_METERS
-      && sample.distanceAlongRoute <= geometry.totalLength - TURN_WINDOW_METERS;
+      && sample.distanceAlongRoute <= endDistance - TURN_WINDOW_METERS;
 
     return insideTurnWindow ? turnAngleAt(geometry, sample.distanceAlongRoute) : 0;
   });
@@ -79,7 +110,7 @@ function buildCandidates(geometry, samples, startDistance, stationConstraints) {
   for (const station of stationConstraints) {
     if (
       station.distanceAlongRoute <= startDistance + 30
-      || station.distanceAlongRoute >= geometry.totalLength - 30
+      || station.distanceAlongRoute >= endDistance - 30
     ) {
       continue;
     }
@@ -95,6 +126,8 @@ function buildCandidates(geometry, samples, startDistance, stationConstraints) {
       }),
       stationName: station.stationName,
       stationIndex: station.stationIndex,
+      distanceToRoute: station.distanceToRoute,
+      projectedToRoute: station.projectedToRoute,
       reasons: ["station"]
     });
   }
@@ -119,7 +152,7 @@ function buildCandidates(geometry, samples, startDistance, stationConstraints) {
       continue;
     }
 
-    const shiftedDistance = Math.min(distance + TURN_SHIFT_METERS, geometry.totalLength - 30);
+    const shiftedDistance = Math.min(distance + TURN_SHIFT_METERS, endDistance - 30);
     const shifted = pointAlongRoute(geometry, shiftedDistance);
 
     addCandidate(candidates, {
@@ -134,7 +167,7 @@ function buildCandidates(geometry, samples, startDistance, stationConstraints) {
   }
 
   for (const boundaryDistance of geometry.boundaryDistances) {
-    if (boundaryDistance <= startDistance + 30 || boundaryDistance >= geometry.totalLength - 30) {
+    if (boundaryDistance <= startDistance + 30 || boundaryDistance >= endDistance - 30) {
       continue;
     }
 
@@ -153,7 +186,7 @@ function buildCandidates(geometry, samples, startDistance, stationConstraints) {
 
   for (
     let distance = firstCoverageDistance;
-    distance < geometry.totalLength - 30;
+    distance < endDistance - 30;
     distance += 240
   ) {
     const point = pointAlongRoute(geometry, distance);
@@ -171,15 +204,14 @@ function buildCandidates(geometry, samples, startDistance, stationConstraints) {
 
   return candidates
     .filter(candidate => candidate.distanceAlongRoute > startDistance + 30)
-    .filter(candidate => candidate.distanceAlongRoute < geometry.totalLength - 30)
+    .filter(candidate => candidate.distanceAlongRoute < endDistance - 30)
     .sort((first, second) => first.distanceAlongRoute - second.distanceAlongRoute)
     .map((candidate, index) => ({
       ...candidate,
       id: index,
       selected: false,
       selectionOrder: null,
-      selectionScore: null,
-      forcedByGeometry: false
+      selectionScore: null
     }));
 }
 
@@ -193,46 +225,85 @@ function minimumCoverageCount(remainingLength, maxWaypoints) {
   return Math.min(count, maxWaypoints);
 }
 
-function scoreCandidate(candidate, anchors, minSpacing, coverageScale) {
-  const nearestDistance = Math.min(...anchors.map(anchor => {
-    return Math.abs(anchor - candidate.distanceAlongRoute);
+function maximumControlGap(controlDistances) {
+  const ordered = [...controlDistances].sort((first, second) => first - second);
+  let maximum = 0;
+
+  for (let index = 1; index < ordered.length; index += 1) {
+    maximum = Math.max(maximum, ordered[index] - ordered[index - 1]);
+  }
+
+  return maximum;
+}
+
+function evaluateCandidate({
+  candidate,
+  geometry,
+  samples,
+  controlDistances,
+  currentMetrics,
+  currentMaximumGap,
+  minSpacing
+}) {
+  const trialDistances = [...controlDistances, candidate.distanceAlongRoute];
+  const trialMetrics = measureControlPath(geometry, trialDistances, samples);
+  const trialMaximumGap = maximumControlGap(trialDistances);
+  const nearestDistance = Math.min(...controlDistances.map(distance => {
+    return Math.abs(distance - candidate.distanceAlongRoute);
   }));
-  const curvature = clamp(candidate.turnAngle / 90, 0, 1);
-  const coverage = clamp(nearestDistance / coverageScale, 0, 1);
-  const spacing = clamp(nearestDistance / minSpacing, 0, 1);
-  const boundaryBonus = candidate.nearSegmentBoundary ? 1 : 0;
-  const score = curvature * 0.60
-    + coverage * 0.25
-    + spacing * 0.10
-    + boundaryBonus * 0.05;
+  const maxDeviationReduction = clamp(
+    (currentMetrics.maxDeviation - trialMetrics.maxDeviation)
+      / Math.max(currentMetrics.maxDeviation, 1),
+    0,
+    1
+  );
+  const percentile95Reduction = clamp(
+    (currentMetrics.percentile95Deviation - trialMetrics.percentile95Deviation)
+      / Math.max(currentMetrics.percentile95Deviation, 1),
+    0,
+    1
+  );
+  const coverageGain = clamp(
+    (currentMaximumGap - trialMaximumGap) / Math.max(currentMaximumGap, 1),
+    0,
+    1
+  );
+  const rootMeanSquareReduction = clamp(
+    (currentMetrics.rootMeanSquareDeviation - trialMetrics.rootMeanSquareDeviation)
+      / Math.max(currentMetrics.rootMeanSquareDeviation, 1),
+    0,
+    1
+  );
+  const turnFidelity = candidate.reasons.has("post-turn")
+    ? clamp(candidate.turnAngle / 90, 0, 1)
+    : 0;
+  const requiredSpacing = turnFidelity >= 0.5 ? minSpacing / 2 : minSpacing;
+  const score = maxDeviationReduction * 0.40
+    + percentile95Reduction * 0.20
+    + rootMeanSquareReduction * 0.20
+    + coverageGain * 0.15
+    + turnFidelity * 0.10;
 
   return {
     score,
     nearestDistance,
+    requiredSpacing,
+    trialMetrics,
+    trialMaximumGap,
     components: {
-      curvature,
-      coverage,
-      spacing,
-      boundaryBonus
+      maxDeviationReduction,
+      percentile95Reduction,
+      rootMeanSquareReduction,
+      coverageGain,
+      turnFidelity,
+      stationPreference: candidate.reasons.has("station") ? 1 : 0
     }
   };
-}
-
-function isSpaced(score, candidate, minSpacing) {
-  if (score.nearestDistance >= minSpacing) {
-    return true;
-  }
-
-  return candidate.turnAngle >= 70 && score.nearestDistance >= minSpacing / 2;
 }
 
 function reasonFor(candidate) {
   if (candidate.reasons.has("station")) {
     return "station";
-  }
-
-  if (candidate.forcedByGeometry) {
-    return "geometric-deviation";
   }
 
   if (candidate.reasons.has("post-turn") && candidate.nearSegmentBoundary) {
@@ -250,61 +321,34 @@ function reasonFor(candidate) {
   return "coverage";
 }
 
-function selectStationCandidates({
-  candidates,
-  geometry,
-  startDistance,
-  maxWaypoints,
-  selected
-}) {
-  const stationCandidates = candidates.filter(candidate => {
-    return candidate.reasons.has("station");
+function choosePreferredCandidate(evaluated) {
+  const ordered = [...evaluated].sort((first, second) => {
+    return second.evaluation.score - first.evaluation.score
+      || Number(second.candidate.reasons.has("station"))
+        - Number(first.candidate.reasons.has("station"))
+      || second.evaluation.nearestDistance - first.evaluation.nearestDistance;
   });
-  const coverageScale = Math.max((geometry.totalLength - startDistance) / 2, 1_200);
+  const best = ordered[0];
 
-  while (selected.length < maxWaypoints) {
-    const available = stationCandidates.filter(candidate => !candidate.selected);
-
-    if (!available.length) {
-      break;
-    }
-
-    const controlDistances = [
-      startDistance,
-      ...selected.map(candidate => candidate.distanceAlongRoute),
-      geometry.totalLength
-    ];
-    const anchors = [...controlDistances];
-    const scored = available.map(candidate => {
-      const deviation = measureControlPath(
-        geometry,
-        controlDistances,
-        [candidate]
-      ).maxDeviation;
-      const nearestAnchor = Math.min(...anchors.map(anchor => {
-        return Math.abs(anchor - candidate.distanceAlongRoute);
-      }));
-      const deviationScore = clamp(deviation / 500, 0, 1);
-      const coverageScore = clamp(nearestAnchor / coverageScale, 0, 1);
-
-      return {
-        candidate,
-        score: deviationScore * 0.75 + coverageScore * 0.25
-      };
-    });
-
-    scored.sort((first, second) => second.score - first.score);
-
-    const choice = scored[0];
-    choice.candidate.selected = true;
-    choice.candidate.selectionOrder = selected.length + 1;
-    choice.candidate.selectionScore = choice.score;
-    selected.push(choice.candidate);
+  if (!best || best.candidate.reasons.has("station")) {
+    return best;
   }
+
+  const bestStation = ordered.find(item => item.candidate.reasons.has("station"));
+
+  if (
+    bestStation
+    && bestStation.evaluation.score >= best.evaluation.score * STATION_PREFERENCE_RATIO
+  ) {
+    return bestStation;
+  }
+
+  return best;
 }
 
 export function selectWaypoints(geometry, {
   startDistance = 0,
+  endDistance = geometry.totalLength,
   maxWaypoints = 9,
   stationConstraints = []
 } = {}) {
@@ -313,75 +357,79 @@ export function selectWaypoints(geometry, {
     geometry,
     samples,
     startDistance,
+    endDistance,
     stationConstraints
   );
-  const remainingLength = geometry.totalLength - startDistance;
-  const minSpacing = clamp(geometry.totalLength / 18, 400, 1_200);
-  const coverageScale = Math.max(remainingLength / 2, 1_200);
+  const remainingLength = endDistance - startDistance;
+  const minSpacing = clamp(
+    remainingLength / Math.max(maxWaypoints * 2, 1),
+    90,
+    350
+  );
   const coverageFloor = minimumCoverageCount(remainingLength, maxWaypoints);
   const selected = [];
   let stoppedForSignificance = false;
 
-  selectStationCandidates({
-    candidates,
-    geometry,
-    startDistance,
-    maxWaypoints,
-    selected
-  });
-
   while (selected.length < maxWaypoints) {
-    const anchors = [
+    const controlDistances = [
       startDistance,
-      geometry.totalLength,
+      endDistance,
       ...selected.map(candidate => candidate.distanceAlongRoute)
     ];
+    const currentMetrics = measureControlPath(geometry, controlDistances, samples);
+    const currentMaximumGap = maximumControlGap(controlDistances);
+    const spacingEligible = candidates.filter(candidate => {
+      if (candidate.selected) {
+        return false;
+      }
 
-    const scored = candidates
-      .filter(candidate => !candidate.selected)
-      .map(candidate => ({
-        candidate,
-        evaluation: scoreCandidate(candidate, anchors, minSpacing, coverageScale)
-      }))
-      .filter(item => isSpaced(item.evaluation, item.candidate, minSpacing))
-      .sort((first, second) => second.evaluation.score - first.evaluation.score);
+      const turnFidelity = candidate.reasons.has("post-turn")
+        ? clamp(candidate.turnAngle / 90, 0, 1)
+        : 0;
+      const requiredSpacing = turnFidelity >= 0.5 ? minSpacing / 2 : minSpacing;
 
-    if (!scored.length) {
+      return controlDistances.every(distance => {
+        return Math.abs(distance - candidate.distanceAlongRoute)
+          >= requiredSpacing;
+      });
+    });
+    const fallbackStations = candidates.filter(candidate => {
+      return !candidate.selected
+        && candidate.reasons.has("station")
+        && controlDistances.every(distance => {
+          return Math.abs(distance - candidate.distanceAlongRoute) >= 30;
+        });
+    });
+    const available = spacingEligible.length ? spacingEligible : fallbackStations;
+    const stationAvailable = available.some(candidate => {
+      return candidate.reasons.has("station");
+    });
+    const geometryNeedsHelp = currentMetrics.maxDeviation
+      > MAX_ACCEPTABLE_DEVIATION_METERS
+      || currentMetrics.percentile95Deviation > P95_ACCEPTABLE_DEVIATION_METERS;
+
+    if (!available.length) {
       break;
     }
 
-    const controlDistances = [
-      startDistance,
-      ...selected.map(candidate => candidate.distanceAlongRoute),
-      geometry.totalLength
-    ];
-    const metrics = measureControlPath(geometry, controlDistances, samples);
-    const geometryNeedsHelp = metrics.maxDeviation > 250
-      || metrics.percentile95Deviation > 100;
-    let choice = scored[0];
-
-    if (choice.evaluation.score < MIN_SIGNIFICANCE && selected.length >= coverageFloor) {
-      if (!geometryNeedsHelp) {
-        stoppedForSignificance = true;
-        break;
-      }
-
-      const geometricChoice = [...scored].sort((first, second) => {
-        const firstDistance = Math.abs(
-          first.candidate.distanceAlongRoute - metrics.maxDeviationDistance
-        );
-        const secondDistance = Math.abs(
-          second.candidate.distanceAlongRoute - metrics.maxDeviationDistance
-        );
-
-        return firstDistance - secondDistance;
-      })[0];
-
-      if (geometricChoice) {
-        choice = geometricChoice;
-        choice.candidate.forcedByGeometry = true;
-      }
+    if (selected.length >= coverageFloor && !stationAvailable && !geometryNeedsHelp) {
+      stoppedForSignificance = true;
+      break;
     }
+
+    const evaluated = available.map(candidate => ({
+      candidate,
+      evaluation: evaluateCandidate({
+        candidate,
+        geometry,
+        samples,
+        controlDistances,
+        currentMetrics,
+        currentMaximumGap,
+        minSpacing
+      })
+    }));
+    const choice = choosePreferredCandidate(evaluated);
 
     choice.candidate.selected = true;
     choice.candidate.selectionOrder = selected.length + 1;
@@ -393,20 +441,28 @@ export function selectWaypoints(geometry, {
 
   const finalAnchors = [
     startDistance,
-    geometry.totalLength,
+    endDistance,
     ...selected.map(candidate => candidate.distanceAlongRoute)
   ];
+  const finalBaseMetrics = measureControlPath(geometry, finalAnchors, samples);
+  const finalMaximumGap = maximumControlGap(finalAnchors);
 
   for (const candidate of candidates) {
-    candidate.finalEvaluation = scoreCandidate(
+    candidate.finalEvaluation = evaluateCandidate({
       candidate,
-      finalAnchors,
-      minSpacing,
-      coverageScale
-    );
+      geometry,
+      samples,
+      controlDistances: finalAnchors,
+      currentMetrics: finalBaseMetrics,
+      currentMaximumGap: finalMaximumGap,
+      minSpacing
+    });
 
     if (!candidate.selected) {
-      if (!isSpaced(candidate.finalEvaluation, candidate, minSpacing)) {
+      if (
+        candidate.finalEvaluation.nearestDistance
+          < candidate.finalEvaluation.requiredSpacing
+      ) {
         candidate.rejectionReason = "too-close";
       } else if (selected.length >= maxWaypoints) {
         candidate.rejectionReason = "max-waypoints";
@@ -420,7 +476,7 @@ export function selectWaypoints(geometry, {
 
   const finalMetrics = measureControlPath(
     geometry,
-    [startDistance, ...selected.map(item => item.distanceAlongRoute), geometry.totalLength],
+    [startDistance, ...selected.map(item => item.distanceAlongRoute), endDistance],
     samples
   );
 
@@ -432,9 +488,12 @@ export function selectWaypoints(geometry, {
       score: candidate.selectionScore,
       turnAngle: candidate.turnAngle,
       reason: reasonFor(candidate),
+      roles: [...candidate.reasons],
       ...(candidate.stationName ? {
         stationName: candidate.stationName,
-        stationIndex: candidate.stationIndex
+        stationIndex: candidate.stationIndex,
+        distanceToRoute: candidate.distanceToRoute,
+        projectedToRoute: candidate.projectedToRoute
       } : {})
     })),
     samples,
@@ -454,8 +513,11 @@ export function selectWaypoints(geometry, {
       selectionOrder: candidate.selectionOrder,
       rejectionReason: candidate.rejectionReason ?? null,
       reason: candidate.selected ? reasonFor(candidate) : [...candidate.reasons].join("+"),
+      roles: [...candidate.reasons],
       stationName: candidate.stationName ?? null,
-      stationIndex: candidate.stationIndex ?? null
+      stationIndex: candidate.stationIndex ?? null,
+      distanceToRoute: candidate.distanceToRoute ?? null,
+      projectedToRoute: candidate.projectedToRoute ?? false
     }))
   };
 }

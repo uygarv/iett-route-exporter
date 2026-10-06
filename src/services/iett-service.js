@@ -1,18 +1,28 @@
 import { AppError } from "../shared/errors.js";
 import {
   buildRouteGeometry,
-  findClosestRoutePosition,
-  haversineDistance
+  findClosestRoutePosition
 } from "../routing/geometry.js";
 import { buildAppleMapsUrl } from "../providers/apple-maps.js";
 import { buildGoogleMapsUrl } from "../providers/google-maps.js";
+import { buildYandexMapsUrl } from "../providers/yandex-maps.js";
 import { IettClient } from "../clients/iett-client.js";
+import { TomTomClient } from "../clients/tomtom-client.js";
 import {
   parseCoordinate,
   readOptionalCoordinate,
   requireCode
 } from "../shared/validation.js";
 import { selectWaypoints } from "../routing/waypoints.js";
+import { coordinateForRouteMatch } from "../routing/stop-projection.js";
+import { matchStopsToRoute } from "../routing/timing.js";
+import {
+  addStationSequenceNumbers,
+  findStationsByName,
+  normalizeStationName
+} from "../routing/stations.js";
+import { createIettTravelTimeService } from "./iett-travel-times.js";
+import { createIettGpxService } from "./iett-gpx-service.js";
 
 export function parseRouteCode(code) {
   const value = requireCode(code, "routeCode");
@@ -55,18 +65,25 @@ function stopName(stop) {
   return stop.stationName.trim() || null;
 }
 
-function endpointFromStop(stop, geometryPoint) {
+function endpointFromStop(stop, geometry, geometryPoint, fallbackDistance) {
   const coordinate = readOptionalCoordinate(stop);
 
-  if (coordinate && haversineDistance(coordinate, geometryPoint) <= 250) {
-    return coordinate;
+  if (!coordinate) {
+    return {
+      coordinate: { lat: geometryPoint.lat, lng: geometryPoint.lng },
+      distanceAlongRoute: fallbackDistance
+    };
   }
 
-  return { lat: geometryPoint.lat, lng: geometryPoint.lng };
+  const match = findClosestRoutePosition(geometry, coordinate);
+  return {
+    coordinate: coordinateForRouteMatch(coordinate, match),
+    distanceAlongRoute: match.distanceAlongRoute
+  };
 }
 
 function stationConstraintsFromStops(stops, geometry) {
-  const constraints = [];
+  const validStops = [];
 
   for (const [stationIndex, stop] of stops.entries()) {
     const coordinate = readOptionalCoordinate(stop);
@@ -76,23 +93,38 @@ function stationConstraintsFromStops(stops, geometry) {
       continue;
     }
 
-    const match = findClosestRoutePosition(geometry, coordinate);
-
-    if (match.distanceToRoute > 250) {
-      continue;
-    }
-
-    constraints.push({
-      ...coordinate,
-      stationName,
-      stationIndex,
-      distanceAlongRoute: match.distanceAlongRoute
+    validStops.push({
+      ...stop,
+      stationIndex
     });
   }
 
-  return constraints.sort((first, second) => {
-    return first.distanceAlongRoute - second.distanceAlongRoute;
-  });
+  if (validStops.length < 2) {
+    return validStops.map(stop => {
+      const coordinate = readOptionalCoordinate(stop);
+      const match = findClosestRoutePosition(geometry, coordinate);
+      const routeCoordinate = coordinateForRouteMatch(coordinate, match);
+
+      return {
+        ...routeCoordinate,
+        stationName: stopName(stop),
+        stationIndex: stop.stationIndex,
+        distanceAlongRoute: match.distanceAlongRoute,
+        distanceToRoute: match.distanceToRoute,
+        projectedToRoute: routeCoordinate.lat !== coordinate.lat
+          || routeCoordinate.lng !== coordinate.lng
+      };
+    });
+  }
+
+  return matchStopsToRoute(validStops, geometry).map(stop => ({
+    ...stop.providerCoordinate,
+    stationName: stop.name,
+    stationIndex: stop.stationIndex,
+    distanceAlongRoute: stop.distanceAlongRoute,
+    distanceToRoute: stop.distanceToRoute,
+    projectedToRoute: stop.projectedToRoute
+  }));
 }
 
 function validateBuildOptions(options, { defaultMaxWaypoints, maxWaypointsLimit }) {
@@ -101,7 +133,8 @@ function validateBuildOptions(options, { defaultMaxWaypoints, maxWaypointsLimit 
       maxWaypoints: defaultMaxWaypoints,
       debug: false,
       currentLocation: null,
-      startStation: null
+      startStation: null,
+      endStation: null
     };
   }
 
@@ -131,6 +164,7 @@ function validateBuildOptions(options, { defaultMaxWaypoints, maxWaypointsLimit 
     ? null
     : parseCoordinate(options.currentLocation, "currentLocation");
   let startStation = null;
+  let endStation = null;
 
   if (options.startStation !== undefined) {
     if (typeof options.startStation !== "string") {
@@ -141,6 +175,18 @@ function validateBuildOptions(options, { defaultMaxWaypoints, maxWaypointsLimit 
 
     if (!startStation || startStation.length > 200) {
       throw new AppError(400, "INVALID_START_STATION", "startStation is invalid.");
+    }
+  }
+
+  if (options.endStation !== undefined) {
+    if (typeof options.endStation !== "string") {
+      throw new AppError(400, "INVALID_END_STATION", "endStation must be a string.");
+    }
+
+    endStation = options.endStation.trim();
+
+    if (!endStation || endStation.length > 200) {
+      throw new AppError(400, "INVALID_END_STATION", "endStation is invalid.");
     }
   }
 
@@ -156,7 +202,8 @@ function validateBuildOptions(options, { defaultMaxWaypoints, maxWaypointsLimit 
     maxWaypoints,
     debug: options.debug ?? false,
     currentLocation,
-    startStation
+    startStation,
+    endStation
   };
 }
 
@@ -181,85 +228,75 @@ function routeName(value) {
   return value.trim() || null;
 }
 
-function normalizeStopName(value) {
-  return value
-    .normalize("NFKD")
-    .replace(/\p{M}/gu, "")
-    .replace(/ı/g, "i")
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
 function directionId(start, end) {
-  return `${normalizeStopName(start)}__${normalizeStopName(end)}`;
+  return `${normalizeStationName(start)}__${normalizeStationName(end)}`;
 }
 
-function resolveStartStation(stops, geometry, requestedName) {
-  const normalizedRequest = normalizeStopName(requestedName);
-  const matches = stops
-    .map((stop, stationIndex) => ({
-      stop,
-      stationIndex,
-      stationName: stopName(stop)
-    }))
-    .filter(candidate => {
-      return candidate.stationName
-        && normalizeStopName(candidate.stationName) === normalizedRequest;
-    });
+function resolveNamedStation(stops, stationConstraints, geometry, requestedName, role) {
+  const errorPrefix = role.toUpperCase();
+  const detailName = `${role}Station`;
+  const readableStops = addStationSequenceNumbers(stops.map((stop, stationIndex) => ({
+    stationIndex,
+    name: stopName(stop),
+    coordinate: readOptionalCoordinate(stop)
+  })));
+  const matches = findStationsByName(readableStops, requestedName);
 
   if (!matches.length) {
     throw new AppError(
       400,
-      "START_STATION_NOT_FOUND",
-      "The requested start station does not exist on this route.",
-      { startStation: requestedName }
+      `${errorPrefix}_STATION_NOT_FOUND`,
+      `The requested ${role} station does not exist on this route.`,
+      { [detailName]: requestedName }
     );
   }
 
   if (matches.length > 1) {
     throw new AppError(
       400,
-      "AMBIGUOUS_START_STATION",
+      `AMBIGUOUS_${errorPrefix}_STATION`,
       "The requested station occurs more than once on this route.",
       {
-        startStation: requestedName,
-        stationIndexes: matches.map(match => match.stationIndex)
+        [detailName]: requestedName,
+        stationIndexes: matches.map(match => match.stationIndex),
+        candidates: matches.map(match => ({
+          stationIndex: match.stationIndex,
+          name: match.name,
+          lat: match.coordinate?.lat ?? null,
+          lng: match.coordinate?.lng ?? null
+        }))
       }
     );
   }
 
   const selected = matches[0];
-  const coordinate = readOptionalCoordinate(selected.stop);
-
-  if (!coordinate) {
+  if (!selected.coordinate) {
     throw new AppError(
       502,
-      "IETT_INVALID_START_STATION",
+      `IETT_INVALID_${errorPrefix}_STATION`,
       "The requested IETT station has invalid coordinates.",
-      { startStation: selected.stationName }
+      { [detailName]: selected.name }
     );
   }
 
-  const routeMatch = findClosestRoutePosition(geometry, coordinate);
-
-  if (routeMatch.distanceToRoute > 250) {
-    throw new AppError(
-      502,
-      "IETT_START_STATION_OFF_ROUTE",
-      "The requested IETT station is too far from its route geometry.",
-      {
-        startStation: selected.stationName,
-        distanceMeters: Math.round(routeMatch.distanceToRoute)
-      }
-    );
-  }
+  const constraint = stationConstraints.find(candidate => {
+    return candidate.stationIndex === selected.stationIndex;
+  });
+  const routeMatch = constraint ?? findClosestRoutePosition(geometry, selected.coordinate);
+  const routeCoordinate = constraint
+    ? { lat: constraint.lat, lng: constraint.lng }
+    : coordinateForRouteMatch(selected.coordinate, routeMatch);
 
   return {
-    name: selected.stationName,
+    name: selected.name,
     index: selected.stationIndex,
-    coordinate,
-    distanceAlongRoute: routeMatch.distanceAlongRoute
+    coordinate: routeCoordinate,
+    originalCoordinate: selected.coordinate,
+    distanceAlongRoute: routeMatch.distanceAlongRoute,
+    distanceToRoute: routeMatch.distanceToRoute,
+    projectedToRoute: constraint?.projectedToRoute
+      ?? (routeCoordinate.lat !== selected.coordinate.lat
+        || routeCoordinate.lng !== selected.coordinate.lng)
   };
 }
 
@@ -270,11 +307,23 @@ function publicVariant(variant) {
     name: variant.name,
     rawName: variant.rawName,
     start: variant.start,
-    end: variant.end
+    end: variant.end,
+    stops: variant.stops
   };
 }
 
-export function createIettService({ client = new IettClient() } = {}) {
+export function createIettService({
+  client = new IettClient(),
+  tomTomClient = new TomTomClient(),
+  timingCacheTtlMs = 60_000
+} = {}) {
+  const travelTimeService = createIettTravelTimeService({
+    iettClient: client,
+    tomTomClient,
+    cacheTtlMs: timingCacheTtlMs
+  });
+  const gpxService = createIettGpxService({ iettClient: client });
+
   async function getIettRouteOptions(lineCodeInput) {
     const lineCode = requireCode(lineCodeInput, "lineCode");
     const warnings = [];
@@ -396,18 +445,25 @@ export function createIettService({ client = new IettClient() } = {}) {
           };
         }
 
+        const readableStops = addStationSequenceNumbers(stops.map((stop, stationIndex) => ({
+          stationIndex,
+          name: stopName(stop),
+          coordinate: readOptionalCoordinate(stop)
+        })));
+
         return {
           variant: {
             code: route.code,
             type: route.type,
             name: route.type === "base"
-              ? route.rawName ?? "Normal güzergâh"
+              ? route.rawName ?? "Normal Düzergah"
               : route.rawName,
             rawName: route.rawName,
             start,
             end,
-            directionLabel: `${start} → ${end}`,
-            directionId: directionId(start, end)
+            directionLabel: `${start} - ${end}`,
+            directionId: directionId(start, end),
+            stops: readableStops
           },
           missingName: route.type === "variant" && !route.rawName
         };
@@ -481,14 +537,38 @@ export function createIettService({ client = new IettClient() } = {}) {
     const record = firstRouteRecord(routeData, routeCode);
     const geometry = buildRouteGeometry(record.line);
     const stops = Array.isArray(record.stationPlaces) ? record.stationPlaces : [];
+    const stationConstraints = stationConstraintsFromStops(stops, geometry);
     const geometryOrigin = geometry.points[0];
     const geometryDestination = geometry.points.at(-1);
-    const destination = endpointFromStop(stops.at(-1), geometryDestination);
-    const stationConstraints = stationConstraintsFromStops(stops, geometry);
-    let origin = endpointFromStop(stops[0], geometryOrigin);
-    let startDistanceAlongRoute = 0;
+    const firstConstraint = stationConstraints.find(stop => stop.stationIndex === 0);
+    const lastConstraint = stationConstraints.find(stop => {
+      return stop.stationIndex === stops.length - 1;
+    });
+    const firstStop = firstConstraint
+      ? {
+          coordinate: { lat: firstConstraint.lat, lng: firstConstraint.lng },
+          distanceAlongRoute: firstConstraint.distanceAlongRoute
+        }
+      : endpointFromStop(stops[0], geometry, geometryOrigin, 0);
+    const lastStop = lastConstraint
+      ? {
+          coordinate: { lat: lastConstraint.lat, lng: lastConstraint.lng },
+          distanceAlongRoute: lastConstraint.distanceAlongRoute
+        }
+      : endpointFromStop(
+          stops.at(-1),
+          geometry,
+          geometryDestination,
+          geometry.totalLength
+        );
+    let destination = lastStop.coordinate;
+    let origin = firstStop.coordinate;
+    let startDistanceAlongRoute = firstStop.distanceAlongRoute;
+    let endDistanceAlongRoute = lastStop.distanceAlongRoute;
     let selectedStartStation = null;
+    let selectedEndStation = null;
     let originSource = "route-start";
+    let destinationSource = "route-end";
 
     if (options.currentLocation) {
       const match = findClosestRoutePosition(geometry, options.currentLocation);
@@ -514,18 +594,46 @@ export function createIettService({ client = new IettClient() } = {}) {
       startDistanceAlongRoute = match.distanceAlongRoute;
       originSource = "current-location";
     } else if (options.startStation) {
-      selectedStartStation = resolveStartStation(
+      selectedStartStation = resolveNamedStation(
         stops,
+        stationConstraints,
         geometry,
-        options.startStation
+        options.startStation,
+        "start"
       );
       origin = selectedStartStation.coordinate;
       startDistanceAlongRoute = selectedStartStation.distanceAlongRoute;
       originSource = "station";
     }
 
+    if (options.endStation) {
+      selectedEndStation = resolveNamedStation(
+        stops,
+        stationConstraints,
+        geometry,
+        options.endStation,
+        "end"
+      );
+      destination = selectedEndStation.coordinate;
+      endDistanceAlongRoute = selectedEndStation.distanceAlongRoute;
+      destinationSource = "station";
+    }
+
+    if (endDistanceAlongRoute <= startDistanceAlongRoute + 1) {
+      throw new AppError(
+        400,
+        "INVALID_STATION_RANGE",
+        "The end station must come after the selected route start.",
+        {
+          startDistanceAlongRoute,
+          endDistanceAlongRoute
+        }
+      );
+    }
+
     const selection = selectWaypoints(geometry, {
       startDistance: startDistanceAlongRoute,
+      endDistance: endDistanceAlongRoute,
       maxWaypoints: options.maxWaypoints,
       stationConstraints
     });
@@ -540,13 +648,21 @@ export function createIettService({ client = new IettClient() } = {}) {
       origin,
       originSource,
       destination,
+      destinationSource,
       waypoints: selection.waypoints,
       routeLengthMeters: geometry.totalLength,
       startDistanceAlongRoute,
-      remainingRouteLengthMeters: geometry.totalLength - startDistanceAlongRoute,
+      endDistanceAlongRoute,
+      remainingRouteLengthMeters: endDistanceAlongRoute - startDistanceAlongRoute,
       stationCount: stops.length,
       stationWaypointCount: selection.waypoints.filter(waypoint => {
         return waypoint.reason === "station";
+      }).length,
+      turnPreservingStationCount: selection.waypoints.filter(waypoint => {
+        return waypoint.reason === "station" && waypoint.roles.includes("post-turn");
+      }).length,
+      additionalTurnWaypointCount: selection.waypoints.filter(waypoint => {
+        return waypoint.reason !== "station" && waypoint.roles.includes("post-turn");
       }).length,
       originalPointCount: geometry.rawPointCount,
       resampledPointCount: selection.samples.length,
@@ -560,13 +676,21 @@ export function createIettService({ client = new IettClient() } = {}) {
       };
     }
 
+    if (selectedEndStation) {
+      result.endStation = {
+        name: selectedEndStation.name,
+        index: selectedEndStation.index
+      };
+    }
+
     if (options.debug) {
       result.debug = {
         candidates: selection.candidates,
         minSpacingMeters: selection.minSpacing,
         controlPath: {
           maxDeviationMeters: selection.metrics.maxDeviation,
-          percentile95DeviationMeters: selection.metrics.percentile95Deviation
+          percentile95DeviationMeters: selection.metrics.percentile95Deviation,
+          rootMeanSquareDeviationMeters: selection.metrics.rootMeanSquareDeviation
         }
       };
     }
@@ -592,10 +716,35 @@ export function createIettService({ client = new IettClient() } = {}) {
     });
   }
 
+  function buildIettYandexMapsRoute(routeCode, options) {
+    return buildIettMapsRoute(routeCode, options, {
+      id: "yandex-maps",
+      defaultMaxWaypoints: 18,
+      maxWaypointsLimit: 18,
+      buildUrl: buildYandexMapsUrl
+    });
+  }
+
+  async function calculateIettRouteTimes(routeCodeInput, options) {
+    const routeCode = requireCode(routeCodeInput, "routeCode");
+    return travelTimeService.calculateIettRouteTimes(routeCode, options);
+  }
+
+  async function buildIettGpx(routeCodeInput, options) {
+    const routeCode = requireCode(routeCodeInput, "routeCode");
+    return gpxService.buildIettGpx(routeCode, options);
+  }
+
   return {
     getIettRouteOptions,
     prepareIettLine: getIettRouteOptions,
     buildIettGoogleMapsRoute,
-    buildIettAppleMapsRoute
+    buildIettAppleMapsRoute,
+    buildIettYandexMapsRoute,
+    buildIettGpx,
+    calculateIettRouteTimes,
+    clearCaches() {
+      travelTimeService.clearCache();
+    }
   };
 }

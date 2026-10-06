@@ -221,7 +221,7 @@ function projectToSegment(point, start, end) {
   };
 }
 
-export function findClosestRoutePosition(geometry, coordinate) {
+export function findRoutePositionCandidates(geometry, coordinate) {
   const projectedCoordinate = geometry.projector.project(coordinate);
   const matches = [];
 
@@ -231,12 +231,25 @@ export function findClosestRoutePosition(geometry, coordinate) {
     const match = projectToSegment(projectedCoordinate, start, end);
     const segmentDistance = geometry.cumulativeDistances[index]
       - geometry.cumulativeDistances[index - 1];
+    const distanceAlongRoute = geometry.cumulativeDistances[index - 1]
+      + segmentDistance * match.ratio;
+    const previous = geometry.points[index - 1];
+    const next = geometry.points[index];
 
     matches.push({
       distanceToRoute: match.distance,
-      distanceAlongRoute: geometry.cumulativeDistances[index - 1] + segmentDistance * match.ratio
+      distanceAlongRoute,
+      segmentIndex: index - 1,
+      lat: previous.lat + (next.lat - previous.lat) * match.ratio,
+      lng: previous.lng + (next.lng - previous.lng) * match.ratio
     });
   }
+
+  return matches;
+}
+
+export function findClosestRoutePosition(geometry, coordinate) {
+  const matches = findRoutePositionCandidates(geometry, coordinate);
 
   matches.sort((first, second) => first.distanceToRoute - second.distanceToRoute);
   const best = matches[0];
@@ -263,6 +276,7 @@ export function measureControlPath(geometry, controlDistances, samples) {
   const deviations = [];
   let maxDeviation = 0;
   let maxDeviationDistance = sorted[0];
+  let squaredDeviationTotal = 0;
   let controlIndex = 0;
 
   for (const sample of samples) {
@@ -282,6 +296,7 @@ export function measureControlPath(geometry, controlDistances, samples) {
     const deviation = perpendicularDistance(sample, start, end, geometry.projector);
 
     deviations.push(deviation);
+    squaredDeviationTotal += deviation ** 2;
 
     if (deviation > maxDeviation) {
       maxDeviation = deviation;
@@ -295,6 +310,9 @@ export function measureControlPath(geometry, controlDistances, samples) {
   return {
     maxDeviation,
     percentile95Deviation: deviations[percentileIndex] ?? 0,
+    rootMeanSquareDeviation: deviations.length
+      ? Math.sqrt(squaredDeviationTotal / deviations.length)
+      : 0,
     maxDeviationDistance
   };
 }

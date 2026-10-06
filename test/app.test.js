@@ -27,6 +27,26 @@ test("serves health, discovery, and route-building endpoints", async () => {
     },
     async buildIettAppleMapsRoute(routeCode, options) {
       return { routeCode, received: options, url: "https://maps.apple.com/directions" };
+    },
+    async buildIettYandexMapsRoute(routeCode, options) {
+      return { routeCode, received: options, url: "https://yandex.com/maps/" };
+    },
+    async calculateIettRouteTimes(routeCode, options) {
+      return {
+        routeCode,
+        received: options,
+        provider: "tomtom-orbis",
+        segments: []
+      };
+    },
+    async buildIettGpx(routeCode, options) {
+      return {
+        routeCode,
+        received: options,
+        filename: `${routeCode}.gpx`,
+        contentType: "application/gpx+xml; charset=utf-8",
+        gpx: "<gpx />"
+      };
     }
   };
 
@@ -34,7 +54,7 @@ test("serves health, discovery, and route-building endpoints", async () => {
     const health = await fetch(`${baseUrl}/health`).then(response => response.json());
     assert.deepEqual(health, { status: "ok" });
 
-    const options = await fetch(`${baseUrl}/api/iett/lines/256/options`).then(response => {
+    const options = await fetch(`${baseUrl}/api/iett/lines/256`).then(response => {
       return response.json();
     });
     assert.equal(options.line, "256");
@@ -54,6 +74,35 @@ test("serves health, discovery, and route-building endpoints", async () => {
     }).then(response => response.json());
     assert.equal(appleRoute.routeCode, "256_G_D0");
     assert.equal(appleRoute.received.maxWaypoints, 13);
+
+    const yandexRoute = await fetch(`${baseUrl}/api/iett/routes/256_G_D0/yandex-maps`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ maxWaypoints: 18 })
+    }).then(response => response.json());
+    assert.equal(yandexRoute.routeCode, "256_G_D0");
+    assert.equal(yandexRoute.received.maxWaypoints, 18);
+
+    const travelTimes = await fetch(`${baseUrl}/api/iett/routes/256_G_D0/travel-times`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dwellTimeSeconds: 30 })
+    }).then(response => response.json());
+    assert.equal(travelTimes.routeCode, "256_G_D0");
+    assert.equal(travelTimes.provider, "tomtom-orbis");
+    assert.equal(travelTimes.received.dwellTimeSeconds, 30);
+
+    const gpxResponse = await fetch(
+      `${baseUrl}/api/iett/routes/256_G_D0/gpx?startStation=START`
+    );
+
+    assert.equal(gpxResponse.status, 200);
+    assert.match(gpxResponse.headers.get("content-type"), /application\/gpx\+xml/);
+    assert.equal(
+      gpxResponse.headers.get("content-disposition"),
+      'attachment; filename="256_G_D0.gpx"'
+    );
+    assert.equal(await gpxResponse.text(), "<gpx />");
   });
 });
 
@@ -67,11 +116,17 @@ test("returns consistent API errors and no CORS headers", async () => {
     },
     async buildIettAppleMapsRoute() {
       throw new Error("unused");
+    },
+    async buildIettYandexMapsRoute() {
+      throw new Error("unused");
+    },
+    async calculateIettRouteTimes() {
+      throw new Error("unused");
     }
   };
 
   await withServer(service, async baseUrl => {
-    const response = await fetch(`${baseUrl}/api/iett/lines/256/options`, {
+    const response = await fetch(`${baseUrl}/api/iett/lines/256`, {
       headers: { origin: "https://example.com" }
     });
     const body = await response.json();
@@ -97,6 +152,12 @@ test("returns a 400 API error for malformed JSON", async () => {
       return {};
     },
     async buildIettAppleMapsRoute() {
+      return {};
+    },
+    async buildIettYandexMapsRoute() {
+      return {};
+    },
+    async calculateIettRouteTimes() {
       return {};
     }
   };

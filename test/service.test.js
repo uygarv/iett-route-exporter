@@ -61,7 +61,7 @@ test("merges base and extra routes and groups them by actual endpoints", async (
   const result = await service.getIettRouteOptions("256");
 
   assert.equal(result.directions.length, 2);
-  assert.equal(result.directions[0].label, "START → END");
+  assert.equal(result.directions[0].label, "START - END");
   assert.equal(result.directions[0].id, "START__END");
   assert.equal(result.directions[0].variants.length, 3);
   assert.deepEqual(result.directions[0].variants.map(variant => variant.code), [
@@ -74,7 +74,7 @@ test("merges base and extra routes and groups them by actual endpoints", async (
   assert.equal(result.directions[0].variants[0].rawName, "IETT normal adı");
   assert.equal(result.directions[0].variants[1].name, "Gece");
   assert.equal(result.directions[0].variants[2].name, "Özel sefer");
-  assert.equal(result.directions[1].label, "END → START");
+  assert.equal(result.directions[1].label, "END - START");
   assert.equal(result.directions[1].variants[0].type, "base");
   assert.equal(result.directions[1].variants[0].name, "Dönüş");
   assert.equal(result.warnings.length, 2);
@@ -105,8 +105,54 @@ test("returns validated base directions when GetAllRoute is empty", async () => 
     return direction.variants.map(variant => variant.code);
   }), ["256_G_D0", "256_D_D0"]);
   assert.ok(result.directions.every(direction => {
-    return direction.variants[0].name === "Normal güzergâh";
+    return direction.variants[0].name === "Normal Düzergah";
   }));
+});
+
+test("labels repeated stop names and accepts the numbered internal label", async () => {
+  const repeatedStops = [
+    { stationName: "START", lat: "41", lng: "29" },
+    { stationName: "UZUNÇAYIR METROBÜS", lat: "41", lng: "29.005" },
+    { stationName: "MIDDLE", lat: "41", lng: "29.01" },
+    { stationName: "UZUNÇAYIR METROBÜS", lat: "41.005", lng: "29.01" },
+    { stationName: "END", lat: "41.01", lng: "29.02" }
+  ];
+  const client = {
+    async getRoutePin() {
+      return [{ line, stationPlaces: repeatedStops }];
+    },
+    async getAllRoutes() {
+      return [];
+    }
+  };
+  const service = createIettService({ client });
+  const options = await service.getIettRouteOptions("256");
+  const stops = options.directions[0].variants[0].stops;
+
+  assert.equal(stops[1].stationIndex, 1);
+  assert.equal(stops[1].name, "UZUNÇAYIR METROBÜS (1)");
+  assert.equal(stops[3].name, "UZUNÇAYIR METROBÜS (2)");
+  assert.equal("displayName" in stops[1], false);
+
+  const route = await service.buildIettGoogleMapsRoute("256_G_D0", {
+    startStation: "uzuncayir metrobus (2)"
+  });
+
+  assert.deepEqual(route.startStation, {
+    name: "UZUNÇAYIR METROBÜS (2)",
+    index: 3
+  });
+
+  await assert.rejects(
+    service.buildIettGoogleMapsRoute("256_G_D0", {
+      startStation: "UZUNÇAYIR METROBÜS"
+    }),
+    error => {
+      return error.code === "AMBIGUOUS_START_STATION"
+        && error.details.candidates[0].name === "UZUNÇAYIR METROBÜS (1)"
+        && error.details.candidates[1].name === "UZUNÇAYIR METROBÜS (2)";
+    }
+  );
 });
 
 test("keeps a valid base direction when the opposite base route is unavailable", async () => {
@@ -154,7 +200,7 @@ test("builds an encoded URL and falls back from invalid stop coordinates", async
   assert.ok(result.debug.candidates.length > 0);
 });
 
-test("uses intermediate bus stops before turn-only candidates", async () => {
+test("uses a bus stop itself when it can preserve an important turn", async () => {
   const service = createIettService({
     client: {
       async getRoutePin() {
@@ -176,12 +222,50 @@ test("uses intermediate bus stops before turn-only candidates", async () => {
   });
 
   assert.equal(result.stationCount, 5);
-  assert.equal(result.stationWaypointCount, 2);
-  assert.ok(result.waypoints.every(waypoint => waypoint.reason === "station"));
-  assert.ok(result.waypoints.every(waypoint => waypoint.stationName));
+  assert.ok(result.stationWaypointCount >= 1);
+  assert.ok(result.turnPreservingStationCount >= 1);
+  assert.ok(result.waypoints.some(waypoint => {
+    return waypoint.reason === "station" && waypoint.roles.includes("post-turn");
+  }));
 });
 
-test("builds Apple Maps URLs with up to thirteen ordered waypoints", async () => {
+test("keeps distant stops as priorities and projects them onto the IETT line", async () => {
+  const straightLine = "LINESTRING (29 41, 29.02 41)";
+  const stationPlaces = [
+    { stationName: "START", lat: 41, lng: 29 },
+    { stationName: "DISTANT STOP", lat: 41.003, lng: 29.01 },
+    { stationName: "END", lat: 41, lng: 29.02 }
+  ];
+  const service = createIettService({
+    client: {
+      async getRoutePin() {
+        return [{ line: straightLine, stationPlaces }];
+      }
+    }
+  });
+  const result = await service.buildIettGoogleMapsRoute("256_G_D0", {
+    maxWaypoints: 1
+  });
+
+  assert.equal(result.stationWaypointCount, 1);
+  assert.equal(result.waypoints[0].reason, "station");
+  assert.equal(result.waypoints[0].stationName, "DISTANT STOP");
+  assert.equal(result.waypoints[0].projectedToRoute, true);
+  assert.ok(result.waypoints[0].distanceToRoute > 300);
+  assert.ok(Math.abs(result.waypoints[0].lat - 41) < 1e-9);
+  assert.ok(Math.abs(result.waypoints[0].lng - 29.01) < 1e-9);
+
+  const fromDistantStop = await service.buildIettGoogleMapsRoute("256_G_D0", {
+    startStation: "DISTANT STOP",
+    maxWaypoints: 0
+  });
+
+  assert.equal(fromDistantStop.originSource, "station");
+  assert.ok(Math.abs(fromDistantStop.origin.lat - 41) < 1e-9);
+  assert.ok(Math.abs(fromDistantStop.origin.lng - 29.01) < 1e-9);
+});
+
+test("uses an Apple Maps slot for a turn when it improves fidelity over a stop", async () => {
   const stationPlaces = Array.from({ length: 15 }, (_, index) => {
     if (index <= 4) {
       return {
@@ -217,11 +301,92 @@ test("builds Apple Maps URLs with up to thirteen ordered waypoints", async () =>
 
   assert.equal(result.provider, "apple-maps");
   assert.equal(result.waypoints.length, 13);
-  assert.equal(result.stationWaypointCount, 13);
+  assert.equal(result.stationWaypointCount, 12);
+  assert.equal(result.additionalTurnWaypointCount, 1);
+  assert.ok(result.waypoints.some(waypoint => waypoint.reason === "post-turn"));
   assert.equal(url.origin, "https://maps.apple.com");
   assert.equal(url.pathname, "/directions");
   assert.equal(url.searchParams.get("mode"), "driving");
   assert.equal(url.searchParams.getAll("waypoint").length, 13);
+});
+
+test("builds Yandex Maps URLs with up to eighteen ordered waypoints", async () => {
+  const stationPlaces = Array.from({ length: 20 }, (_, index) => {
+    if (index <= 6) {
+      return {
+        stationName: `STOP ${index}`,
+        lat: "41",
+        lng: String(29 + 0.01 * index / 6)
+      };
+    }
+
+    if (index <= 12) {
+      return {
+        stationName: `STOP ${index}`,
+        lat: String(41 + 0.01 * (index - 6) / 6),
+        lng: "29.01"
+      };
+    }
+
+    return {
+      stationName: `STOP ${index}`,
+      lat: "41.01",
+      lng: String(29.01 + 0.01 * (index - 12) / 7)
+    };
+  });
+  const service = createIettService({
+    client: {
+      async getRoutePin() {
+        return [{ line, stationPlaces }];
+      }
+    }
+  });
+  const result = await service.buildIettYandexMapsRoute("256_G_D0");
+  const url = new URL(result.url);
+  const routePoints = url.searchParams.get("rtext").split("~");
+
+  assert.equal(result.provider, "yandex-maps");
+  assert.equal(result.waypoints.length, 18);
+  assert.equal(url.origin, "https://yandex.com");
+  assert.equal(url.pathname, "/maps/");
+  assert.equal(url.searchParams.get("mode"), "routes");
+  assert.equal(url.searchParams.get("rtt"), "auto");
+  assert.equal(routePoints.length, 20);
+  assert.equal(routePoints[0], `${result.origin.lat},${result.origin.lng}`);
+  assert.equal(routePoints.at(-1), `${result.destination.lat},${result.destination.lng}`);
+});
+
+test("preserves IETT geometry when a Yandex route has more stops than its budget", async () => {
+  const crowdedLine = "LINESTRING (29 41, 29.01 41, 29.01 41.01, 29.02 41.01)";
+  const stationPlaces = [
+    { stationName: "START", lat: 41, lng: 29 },
+    ...Array.from({ length: 10 }, (_, index) => ({
+      stationName: `LOWER ${index}`,
+      lat: 41,
+      lng: 29 + 0.0008 * (index + 1)
+    })),
+    ...Array.from({ length: 10 }, (_, index) => ({
+      stationName: `UPPER ${index}`,
+      lat: 41.01,
+      lng: 29.012 + 0.0007 * index
+    })),
+    { stationName: "END", lat: 41.01, lng: 29.02 }
+  ];
+  const service = createIettService({
+    client: {
+      async getRoutePin() {
+        return [{ line: crowdedLine, stationPlaces }];
+      }
+    }
+  });
+  const result = await service.buildIettYandexMapsRoute("CROWDED", { debug: true });
+
+  assert.equal(stationPlaces.length, 22);
+  assert.equal(result.waypoints.length, 18);
+  assert.ok(result.stationWaypointCount < 18);
+  assert.ok(result.additionalTurnWaypointCount > 0);
+  assert.ok(result.waypoints.some(waypoint => waypoint.reason === "coverage"));
+  assert.ok(result.debug.controlPath.maxDeviationMeters < 100);
 });
 
 test("starts at a named station and removes earlier route controls", async () => {
@@ -257,6 +422,79 @@ test("starts at a named station and removes earlier route controls", async () =>
   assert.equal(new URL(result.url).searchParams.get("source"), "41,29.01");
 });
 
+test("ends at a named station and removes later route controls", async () => {
+  const service = createIettService({
+    client: {
+      async getRoutePin() {
+        return [{
+          line,
+          stationPlaces: [
+            { stationName: "START", lat: "41", lng: "29" },
+            { stationName: "FIRST STOP", lat: "41", lng: "29.005" },
+            { stationName: "KÖPRÜLÜ KAVŞAK", lat: "41", lng: "29.01" },
+            { stationName: "LATER STOP", lat: "41.005", lng: "29.01" },
+            { stationName: "END", lat: "41.01", lng: "29.02" }
+          ]
+        }];
+      }
+    }
+  });
+  const result = await service.buildIettGoogleMapsRoute("256_G_D0", {
+    endStation: "koprulu kavsak"
+  });
+
+  assert.equal(result.originSource, "route-start");
+  assert.equal(result.destinationSource, "station");
+  assert.deepEqual(result.destination, { lat: 41, lng: 29.01 });
+  assert.deepEqual(result.endStation, {
+    name: "KÖPRÜLÜ KAVŞAK",
+    index: 2
+  });
+  assert.ok(result.endDistanceAlongRoute < result.routeLengthMeters);
+  assert.ok(result.waypoints.every(waypoint => {
+    return waypoint.distanceAlongRoute < result.endDistanceAlongRoute;
+  }));
+  assert.equal(
+    new URL(result.url).searchParams.get("destination"),
+    "41,29.01"
+  );
+});
+
+test("builds only the section between named start and end stations", async () => {
+  const service = createIettService({
+    client: {
+      async getRoutePin() {
+        return [{
+          line,
+          stationPlaces: [
+            { stationName: "START", lat: "41", lng: "29" },
+            { stationName: "FIRST STOP", lat: "41", lng: "29.005" },
+            { stationName: "CORNER STOP", lat: "41", lng: "29.01" },
+            { stationName: "LATER STOP", lat: "41.005", lng: "29.01" },
+            { stationName: "END", lat: "41.01", lng: "29.02" }
+          ]
+        }];
+      }
+    }
+  });
+  const result = await service.buildIettAppleMapsRoute("256_G_D0", {
+    startStation: "FIRST STOP",
+    endStation: "LATER STOP"
+  });
+
+  assert.deepEqual(result.origin, { lat: 41, lng: 29.005 });
+  assert.deepEqual(result.destination, { lat: 41.005, lng: 29.01 });
+  assert.ok(result.startDistanceAlongRoute < result.endDistanceAlongRoute);
+  assert.equal(
+    result.remainingRouteLengthMeters,
+    result.endDistanceAlongRoute - result.startDistanceAlongRoute
+  );
+  assert.ok(result.waypoints.every(waypoint => {
+    return waypoint.distanceAlongRoute > result.startDistanceAlongRoute
+      && waypoint.distanceAlongRoute < result.endDistanceAlongRoute;
+  }));
+});
+
 test("rejects missing and conflicting start-station options", async () => {
   const service = createIettService({
     client: {
@@ -279,6 +517,21 @@ test("rejects missing and conflicting start-station options", async () => {
       currentLocation: { lat: 41, lng: 29 }
     }),
     error => error.code === "CONFLICTING_START_OPTIONS"
+  );
+
+  await assert.rejects(
+    service.buildIettGoogleMapsRoute("256_G_D0", {
+      endStation: "UNKNOWN STOP"
+    }),
+    error => error.code === "END_STATION_NOT_FOUND"
+  );
+
+  await assert.rejects(
+    service.buildIettGoogleMapsRoute("256_G_D0", {
+      startStation: "END",
+      endStation: "START"
+    }),
+    error => error.code === "INVALID_STATION_RANGE"
   );
 });
 
@@ -359,6 +612,11 @@ test("rejects malformed route responses and invalid build options", async () => 
 
   await assert.rejects(
     service.buildIettAppleMapsRoute("256_G_D0", { maxWaypoints: 14 }),
+    error => error.code === "INVALID_MAX_WAYPOINTS"
+  );
+
+  await assert.rejects(
+    service.buildIettYandexMapsRoute("256_G_D0", { maxWaypoints: 19 }),
     error => error.code === "INVALID_MAX_WAYPOINTS"
   );
 });

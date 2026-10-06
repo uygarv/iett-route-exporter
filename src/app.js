@@ -1,6 +1,9 @@
 import express from "express";
 import { AppError, toErrorBody } from "./shared/errors.js";
 import { createIettService } from "./services/iett-service.js";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 export function createApp({ service = createIettService() } = {}) {
   const app = express();
@@ -12,7 +15,7 @@ export function createApp({ service = createIettService() } = {}) {
     response.json({ status: "ok" });
   });
 
-  app.get("/api/iett/lines/:lineCode/options", async (request, response, next) => {
+  app.get("/api/iett/lines/:lineCode", async (request, response, next) => {
     try {
       const result = await service.getIettRouteOptions(request.params.lineCode);
       response.json(result);
@@ -40,6 +43,48 @@ export function createApp({ service = createIettService() } = {}) {
         request.body
       );
       response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/iett/routes/:routeCode/yandex-maps", async (request, response, next) => {
+    try {
+      const result = await service.buildIettYandexMapsRoute(
+        request.params.routeCode,
+        request.body
+      );
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/iett/routes/:routeCode/travel-times", async (request, response, next) => {
+    try {
+      const result = await service.calculateIettRouteTimes(
+        request.params.routeCode,
+        request.body
+      );
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/iett/routes/:routeCode/gpx", async (request, response, next) => {
+    try {
+      const result = await service.buildIettGpx(
+        request.params.routeCode,
+        request.query
+      );
+
+      response.set("content-type", result.contentType);
+      response.set(
+        "content-disposition",
+        `attachment; filename="${result.filename}"`
+      );
+      response.send(result.gpx);
     } catch (error) {
       next(error);
     }

@@ -1,6 +1,6 @@
 {
   "name": "iett-route-export",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "engines": {
@@ -12,6 +12,7 @@
     "example": "node examples/line-256.js"
   },
   "dependencies": {
+    "dotenv": "^18.0.5",
     "express": "^5.1.0"
   }
 }

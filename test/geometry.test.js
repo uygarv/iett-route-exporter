@@ -7,6 +7,10 @@ import {
   resampleRoute
 } from "../src/routing/geometry.js";
 import { selectWaypoints } from "../src/routing/waypoints.js";
+import {
+  coordinateForRouteMatch,
+  STOP_PROJECTION_THRESHOLD_METERS
+} from "../src/routing/stop-projection.js";
 
 test("parses lng-lat WKT, joins segments, and preserves boundaries", () => {
   const geometry = buildRouteGeometry(
@@ -77,4 +81,83 @@ test("finds route progress and detects a repeated route location", () => {
   const ambiguous = findClosestRoutePosition(loop, { lat: 41, lng: 29 });
 
   assert.equal(ambiguous.ambiguous, true);
+});
+
+test("projects stop coordinates only after the route-distance tolerance", () => {
+  const coordinate = { lat: 41.001, lng: 29.01 };
+  const routeMatch = { lat: 41, lng: 29.01 };
+
+  assert.deepEqual(coordinateForRouteMatch(coordinate, {
+    ...routeMatch,
+    distanceToRoute: STOP_PROJECTION_THRESHOLD_METERS
+  }), coordinate);
+  assert.deepEqual(coordinateForRouteMatch(coordinate, {
+    ...routeMatch,
+    distanceToRoute: STOP_PROJECTION_THRESHOLD_METERS + 0.01
+  }), routeMatch);
+});
+
+test("keeps nearby stops distinct in the candidate pool", () => {
+  const geometry = buildRouteGeometry("LINESTRING (29 41, 29.024 41)");
+  const first = pointAlongRoute(geometry, 900);
+  const second = pointAlongRoute(geometry, 940);
+  const selection = selectWaypoints(geometry, {
+    maxWaypoints: 4,
+    stationConstraints: [
+      {
+        ...first,
+        stationName: "CLOSE STOP 1",
+        stationIndex: 1,
+        distanceToRoute: 0,
+        projectedToRoute: false
+      },
+      {
+        ...second,
+        stationName: "CLOSE STOP 2",
+        stationIndex: 2,
+        distanceToRoute: 0,
+        projectedToRoute: false
+      }
+    ]
+  });
+  const stationCandidates = selection.candidates.filter(candidate => candidate.stationName);
+
+  assert.deepEqual(stationCandidates.map(candidate => candidate.stationName), [
+    "CLOSE STOP 1",
+    "CLOSE STOP 2"
+  ]);
+});
+
+test("skips redundant straight-road stops in favor of a later turn stop", () => {
+  const geometry = buildRouteGeometry(
+    "LINESTRING (29 41, 29.01 41, 29.01 41.01)"
+  );
+  const cornerDistance = geometry.cumulativeDistances[1];
+  const station = (stationName, stationIndex, distanceAlongRoute) => ({
+    ...pointAlongRoute(geometry, distanceAlongRoute),
+    stationName,
+    stationIndex,
+    distanceToRoute: 0,
+    projectedToRoute: false
+  });
+  const selection = selectWaypoints(geometry, {
+    maxWaypoints: 3,
+    stationConstraints: [
+      station("FLAT A", 1, 400),
+      station("FLAT B", 2, 526),
+      station("TURN STOP", 3, cornerDistance + 100)
+    ]
+  });
+  const selectedStationNames = selection.waypoints
+    .map(waypoint => waypoint.stationName)
+    .filter(Boolean);
+
+  assert.ok(selectedStationNames.includes("TURN STOP"));
+  assert.equal(
+    selectedStationNames.filter(name => name === "FLAT A" || name === "FLAT B").length,
+    1
+  );
+  assert.ok(selection.waypoints.some(waypoint => {
+    return waypoint.stationName === "TURN STOP" && waypoint.roles.includes("post-turn");
+  }));
 });
