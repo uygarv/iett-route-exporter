@@ -8,7 +8,7 @@ This Express.js service exports IETT (Istanbul public bus) routes to map provide
   and depar variants for an IETT bus line.
 - **Map links:** Export bus routes to mapping providers using waypoints.
 - **Stop selection:** Export the whole route or a section between desired stops.
-- **Already on the bus:** Use a current coordinate as the origin and generate
+- **Use your current location:** Use a current coordinate as the origin and generate
   directions for the remaining route.
 - **Travel time estimates:** Calculate traffic-aware durations between stops,
   including configurable dwell time.
@@ -21,27 +21,27 @@ This Express.js service exports IETT (Istanbul public bus) routes to map provide
 
 All IETT related data is fetched from IETT's public API.
 
-**Base URL:**
+Base URL:
 ```text
 https://iett.istanbul/tr/RouteStation/
 ```
 
 ## Contents
 
-- [Run and configuration](#run)
-- [Example script](#example)
-- [Discover line directions and variants](#options-of-a-line)
+- [Run and configuration](#run-and-configuration)
+- [Example](#example)
+- [Discover line directions and variants](#discover-line-directions-and-variants)
 - [Google Maps](#build-a-google-maps-url), [Apple Maps](#build-an-apple-maps-url),
   and [Yandex Maps](#build-a-yandex-maps-url) URLs
-- [Select start and end stops](#start--end-from-a-bus-stop)
-- [Use your current location](#already-on-the-bus)
-- [Traffic-aware travel times](#internal-travel-time)
+- [Select start and end stops](#select-start-and-end-stops)
+- [Use your current location](#use-your-current-location)
+- [Traffic-aware travel times](#travel-time)
 - [Download a GPX track](#download-a-gpx-track)
+- [Additional information](#additional-information)
 - [Debug mode](#debug-mode)
 - [JavaScript library use](#library-use)
-- [Frequently asked questions](#frequently-asked-questions)
 
-## Run
+## Run and configuration
 
 ```bash
 npm install
@@ -72,10 +72,10 @@ Run route discovery and URL generation for IETT line `256`:
 npm run example
 ```
 
-## Options of a line
+## Discover line directions and variants
 
 ```bash
-curl http://localhost:3000/api/iett/lines/<LINE_ID>/
+curl http://localhost:3000/api/iett/lines/<LINE_CODE>/
 ```
 
 ### Sample output
@@ -275,7 +275,7 @@ curl -X POST http://localhost:3000/api/iett/routes/256_G_D0/yandex-maps \
 }
 ```
 
-## Export with custom Start & End stations 
+## Select start and end stops
 
 When start/end stations are provided, the route between these stops provided will be exported.
 
@@ -309,9 +309,9 @@ End stop can also be added to body. Example body:
 - If no start stop provided, initial stop is used. 
 - If no end stop provided, last stop is used.
 
-## Already on the bus
+## Use your current location
 
-When location field is provided, exported route will be initiated from this location. This removes the traveled portion and optimizes waypoints only for the remaining route.
+When currentLocation field is provided, exported route will be initiated from this location. This removes the traveled portion and optimizes waypoints only for the remaining route.
 
 ```bash
 curl -X POST http://localhost:3000/api/iett/routes/256_G_D0/google-maps \
