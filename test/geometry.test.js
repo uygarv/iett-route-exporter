@@ -21,6 +21,34 @@ test("parses lng-lat WKT, joins segments, and preserves boundaries", () => {
   assert.ok(geometry.boundaryDistances[0] > 80);
 });
 
+test("does not use a bare LINESTRING boundary as a waypoint", () => {
+  const geometry = buildRouteGeometry(
+    "LINESTRING (29 41, 29.01 41)|LINESTRING (29.01 41, 29.02 41)"
+  );
+  const selection = selectWaypoints(geometry, { maxWaypoints: 5 });
+  const boundary = selection.candidates.find(candidate => {
+    return candidate.roles.length === 1
+      && candidate.roles.includes("segment-boundary");
+  });
+
+  assert.ok(boundary);
+  assert.equal(boundary.boundaryOnly, true);
+  assert.equal(boundary.selected, false);
+  assert.equal(boundary.rejectionReason, "boundary-only");
+});
+
+test("does not use a weak bend as a standalone turn waypoint", () => {
+  const geometry = buildRouteGeometry(
+    "LINESTRING (29 41, 29.012 41, 29.022 41.003)"
+  );
+  const selection = selectWaypoints(geometry, { maxWaypoints: 5 });
+  const weakTurn = selection.candidates.find(candidate => candidate.weakTurnOnly);
+
+  assert.ok(weakTurn);
+  assert.equal(weakTurn.selected, false);
+  assert.equal(weakTurn.rejectionReason, "weak-turn");
+});
+
 test("rejects malformed and disconnected IETT geometry", () => {
   assert.throws(
     () => buildRouteGeometry("POINT (29 41)"),
@@ -71,10 +99,15 @@ test("does not create waypoint positions on gaps between LINESTRING segments", (
       || gapMiddle.distanceAlongRoute === gapEnd
   );
   assert.ok(gapMatch.distanceToRoute > 30);
-  assert.equal(selection.waypoints.length, 1);
+  const gapStation = selection.candidates.find(candidate => {
+    return candidate.stationName === "GAP STOP";
+  });
 
-  for (const waypoint of selection.waypoints) {
-    const match = findClosestRoutePosition(geometry, waypoint);
+  assert.ok(gapStation);
+  assert.equal(gapStation.rejectionReason, "weak-station");
+
+  for (const candidate of selection.candidates) {
+    const match = findClosestRoutePosition(geometry, candidate);
     assert.ok(match.distanceToRoute < 0.01);
   }
 });
@@ -186,9 +219,66 @@ test("skips redundant straight-road stops in favor of a later turn stop", () => 
   assert.ok(selectedStationNames.includes("TURN STOP"));
   assert.equal(
     selectedStationNames.filter(name => name === "FLAT A" || name === "FLAT B").length,
-    1
+    0
   );
   assert.ok(selection.waypoints.some(waypoint => {
     return waypoint.stationName === "TURN STOP" && waypoint.roles.includes("post-turn");
   }));
+});
+
+test("protects strong turns before weak straight-road stations", () => {
+  const geometry = buildRouteGeometry(
+    "LINESTRING (29 41, 29.01 41, 29.01 41.01, 29.02 41.01, 29.02 41.02)"
+  );
+  const weakStation = pointAlongRoute(geometry, 400);
+  const selection = selectWaypoints(geometry, {
+    maxWaypoints: 2,
+    stationConstraints: [{
+      ...weakStation,
+      stationName: "WEAK STRAIGHT STOP",
+      stationIndex: 1,
+      distanceToRoute: 0,
+      projectedToRoute: false
+    }]
+  });
+  const strongTurns = selection.waypoints.filter(waypoint => {
+    return waypoint.roles.includes("post-turn") && waypoint.turnAngle >= 55;
+  });
+  const weakCandidate = selection.candidates.find(candidate => {
+    return candidate.stationName === "WEAK STRAIGHT STOP";
+  });
+
+  assert.equal(strongTurns.length, 2);
+  assert.equal(weakCandidate.selected, false);
+  assert.equal(weakCandidate.rejectionReason, "weak-station");
+});
+
+test("rejects coverage and boundary points inside a turn decision zone", () => {
+  const geometry = buildRouteGeometry(
+    "LINESTRING (29 41, 29.01143 41) | LINESTRING (29.01143 41, 29.01143 41.01)"
+  );
+  const selection = selectWaypoints(geometry, {
+    maxWaypoints: 2
+  });
+  const strongTurn = selection.candidates.find(candidate => {
+    return candidate.roles.includes("post-turn") && candidate.turnAngle >= 55;
+  });
+  const unsafeCandidates = selection.candidates.filter(candidate => {
+    return !candidate.roles.includes("post-turn")
+      && candidate.nearTurnDecisionPoint;
+  });
+
+  assert.ok(strongTurn);
+  assert.ok(unsafeCandidates.length > 0);
+  assert.equal(strongTurn.selected, true);
+
+  for (const candidate of unsafeCandidates) {
+    assert.equal(candidate.selected, false);
+    assert.equal(candidate.rejectionReason, "junction-proximity");
+    const offset = candidate.distanceAlongRoute
+      - candidate.nearestTurnSourceDistance;
+
+    assert.ok(offset > -100);
+    assert.ok(offset < 30);
+  }
 });

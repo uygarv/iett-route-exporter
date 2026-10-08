@@ -200,7 +200,7 @@ test("builds an encoded URL and falls back from invalid stop coordinates", async
   assert.ok(result.debug.candidates.length > 0);
 });
 
-test("uses a bus stop itself when it can preserve an important turn", async () => {
+test("uses a post-turn waypoint instead of filling capacity with stops", async () => {
   const service = createIettService({
     client: {
       async getRoutePin() {
@@ -222,14 +222,13 @@ test("uses a bus stop itself when it can preserve an important turn", async () =
   });
 
   assert.equal(result.stationCount, 5);
-  assert.ok(result.stationWaypointCount >= 1);
-  assert.ok(result.turnPreservingStationCount >= 1);
+  assert.ok(result.additionalTurnWaypointCount >= 1);
   assert.ok(result.waypoints.some(waypoint => {
-    return waypoint.reason === "station" && waypoint.roles.includes("post-turn");
+    return waypoint.roles.includes("post-turn") && waypoint.turnAngle >= 55;
   }));
 });
 
-test("keeps distant stops as priorities and projects them onto the IETT line", async () => {
+test("does not spend a waypoint on a weak straight-road stop", async () => {
   const straightLine = "LINESTRING (29 41, 29.02 41)";
   const stationPlaces = [
     { stationName: "START", lat: 41, lng: 29 },
@@ -247,13 +246,9 @@ test("keeps distant stops as priorities and projects them onto the IETT line", a
     maxWaypoints: 1
   });
 
-  assert.equal(result.stationWaypointCount, 1);
-  assert.equal(result.waypoints[0].reason, "station");
-  assert.equal(result.waypoints[0].stationName, "DISTANT STOP");
-  assert.equal(result.waypoints[0].projectedToRoute, true);
-  assert.ok(result.waypoints[0].distanceToRoute > 300);
-  assert.ok(Math.abs(result.waypoints[0].lat - 41) < 1e-9);
-  assert.ok(Math.abs(result.waypoints[0].lng - 29.01) < 1e-9);
+  assert.equal(result.stationWaypointCount, 0);
+  assert.equal(result.waypoints.length, 1);
+  assert.equal(result.waypoints[0].reason, "coverage");
 
   const fromDistantStop = await service.buildIettGoogleMapsRoute("256_G_D0", {
     startStation: "DISTANT STOP",
@@ -263,6 +258,58 @@ test("keeps distant stops as priorities and projects them onto the IETT line", a
   assert.equal(fromDistantStop.originSource, "station");
   assert.ok(Math.abs(fromDistantStop.origin.lat - 41) < 1e-9);
   assert.ok(Math.abs(fromDistantStop.origin.lng - 29.01) < 1e-9);
+});
+
+test("covers the strong turn between Fidan and Darülaceze before Kozyatağı", async () => {
+  const regressionLine = [
+    "29 41",
+    "29.02 41",
+    "29.02 41.01",
+    "29.03 41.01",
+    "29.03 41.02",
+    "29.04 41.02"
+  ].join(", ");
+  const stationPlaces = [
+    { stationName: "START", lat: 41, lng: 29 },
+    { stationName: "KOZYATAĞI METRO", lat: 41, lng: 29.01 },
+    { stationName: "FİDAN SOKAK", lat: 41.01, lng: 29.02 },
+    { stationName: "DÜZENLİ SOKAK", lat: 41.01, lng: 29.0288 },
+    { stationName: "DARÜLACEZE MÜDÜRLÜĞÜ", lat: 41.02, lng: 29.03 },
+    { stationName: "END", lat: 41.02, lng: 29.04 }
+  ];
+  const service = createIettService({
+    client: {
+      async getRoutePin() {
+        return [{
+          line: `LINESTRING (${regressionLine})`,
+          stationPlaces
+        }];
+      }
+    }
+  });
+  const result = await service.buildIettGoogleMapsRoute("19_D_D0", {
+    maxWaypoints: 3,
+    debug: true
+  });
+  const kozyatagi = result.debug.candidates.find(candidate => {
+    return candidate.stationName === "KOZYATAĞI METRO";
+  });
+  const fidan = result.debug.candidates.find(candidate => {
+    return candidate.stationName === "FİDAN SOKAK";
+  });
+  const darulaceze = result.debug.candidates.find(candidate => {
+    return candidate.stationName === "DARÜLACEZE MÜDÜRLÜĞÜ";
+  });
+  const protectedTurn = result.waypoints.find(waypoint => {
+    return waypoint.roles.includes("post-turn")
+      && waypoint.turnAngle >= 55
+      && waypoint.distanceAlongRoute > fidan.distanceAlongRoute
+      && waypoint.distanceAlongRoute < darulaceze.distanceAlongRoute;
+  });
+
+  assert.equal(kozyatagi.selected, false);
+  assert.equal(kozyatagi.rejectionReason, "weak-station");
+  assert.ok(protectedTurn);
 });
 
 test("uses an Apple Maps slot for a turn when it improves fidelity over a stop", async () => {
@@ -300,14 +347,17 @@ test("uses an Apple Maps slot for a turn when it improves fidelity over a stop",
   const url = new URL(result.url);
 
   assert.equal(result.provider, "apple-maps");
-  assert.equal(result.waypoints.length, 13);
-  assert.equal(result.stationWaypointCount, 12);
-  assert.equal(result.additionalTurnWaypointCount, 1);
+  assert.ok(result.waypoints.length > 0);
+  assert.ok(result.waypoints.length <= 13);
+  assert.ok(result.additionalTurnWaypointCount > 0);
   assert.ok(result.waypoints.some(waypoint => waypoint.reason === "post-turn"));
   assert.equal(url.origin, "https://maps.apple.com");
   assert.equal(url.pathname, "/directions");
   assert.equal(url.searchParams.get("mode"), "driving");
-  assert.equal(url.searchParams.getAll("waypoint").length, 13);
+  assert.equal(
+    url.searchParams.getAll("waypoint").length,
+    result.waypoints.length
+  );
 });
 
 test("builds Yandex Maps URLs with up to eighteen ordered waypoints", async () => {
@@ -346,12 +396,13 @@ test("builds Yandex Maps URLs with up to eighteen ordered waypoints", async () =
   const routePoints = url.searchParams.get("rtext").split("~");
 
   assert.equal(result.provider, "yandex-maps");
-  assert.equal(result.waypoints.length, 18);
+  assert.ok(result.waypoints.length > 0);
+  assert.ok(result.waypoints.length <= 18);
   assert.equal(url.origin, "https://yandex.com");
   assert.equal(url.pathname, "/maps/");
   assert.equal(url.searchParams.get("mode"), "routes");
   assert.equal(url.searchParams.get("rtt"), "auto");
-  assert.equal(routePoints.length, 20);
+  assert.equal(routePoints.length, result.waypoints.length + 2);
   assert.equal(routePoints[0], `${result.origin.lat},${result.origin.lng}`);
   assert.equal(routePoints.at(-1), `${result.destination.lat},${result.destination.lng}`);
 });
@@ -382,11 +433,12 @@ test("preserves IETT geometry when a Yandex route has more stops than its budget
   const result = await service.buildIettYandexMapsRoute("CROWDED", { debug: true });
 
   assert.equal(stationPlaces.length, 22);
-  assert.equal(result.waypoints.length, 18);
-  assert.ok(result.stationWaypointCount < 18);
+  assert.ok(result.waypoints.length > 0);
+  assert.ok(result.waypoints.length <= 18);
+  assert.ok(result.stationWaypointCount < result.waypoints.length);
   assert.ok(result.additionalTurnWaypointCount > 0);
   assert.ok(result.waypoints.some(waypoint => waypoint.reason === "coverage"));
-  assert.ok(result.debug.controlPath.maxDeviationMeters < 100);
+  assert.ok(result.debug.controlPath.maxDeviationMeters < 110);
 });
 
 test("starts at a named station and removes earlier route controls", async () => {

@@ -7,9 +7,19 @@ import {
 
 const TURN_WINDOW_METERS = 80;
 const TURN_SHIFT_METERS = 110;
+const TURN_PEAK_WINDOW_METERS = 90;
+const TURN_DECISION_ZONE_BEFORE_METERS = 100;
+const TURN_DECISION_ZONE_AFTER_METERS = 30;
 const CANDIDATE_MERGE_METERS = 60;
-const STATION_TURN_ASSOCIATION_METERS = 200;
-const STATION_PREFERENCE_RATIO = 0.8;
+const STATION_TURN_MIN_OFFSET_METERS = 60;
+const STATION_TURN_MAX_OFFSET_METERS = 160;
+const STATION_TURN_TARGET_TOLERANCE_METERS = 50;
+const STRONG_TURN_DEGREES = 55;
+const MEDIUM_TURN_DEGREES = 25;
+const MIN_SIGNIFICANCE_SCORE = 0.05;
+const MIN_GEOMETRY_REDUCTION = 0.03;
+const MIN_GAP_REDUCTION = 0.08;
+const MIN_SWAP_IMPROVEMENT = 0.005;
 const MAX_ACCEPTABLE_DEVIATION_METERS = 75;
 const P95_ACCEPTABLE_DEVIATION_METERS = 30;
 const RESAMPLE_SPACING_METERS = 30;
@@ -31,29 +41,106 @@ function turnAngleAt(geometry, distance) {
   return Math.abs(((outgoing - incoming + 540) % 360) - 180);
 }
 
-function addCandidate(candidates, incoming) {
-  const incomingIsStation = incoming.reasons.includes("station");
-  let existing = null;
-
-  if (!incomingIsStation && incoming.reasons.includes("post-turn")) {
-    existing = candidates
-      .filter(candidate => candidate.reasons.has("station"))
-      .filter(candidate => {
-        return candidate.distanceAlongRoute >= incoming.turnSourceDistance - 30
-          && candidate.distanceAlongRoute
-            <= incoming.turnSourceDistance + STATION_TURN_ASSOCIATION_METERS;
-      })
-      .sort((first, second) => {
-        return Math.abs(first.distanceAlongRoute - incoming.distanceAlongRoute)
-          - Math.abs(second.distanceAlongRoute - incoming.distanceAlongRoute);
-      })[0] ?? null;
+function turnClass(angle) {
+  if (angle >= STRONG_TURN_DEGREES) {
+    return "strong";
   }
+
+  if (angle >= MEDIUM_TURN_DEGREES) {
+    return "medium";
+  }
+
+  if (angle >= 10) {
+    return "weak";
+  }
+
+  return "none";
+}
+
+function isStrongTurnCandidate(candidate) {
+  return candidate.reasons.has("post-turn")
+    && candidate.turnAngle >= STRONG_TURN_DEGREES;
+}
+
+function stationForTurn(candidates, incoming) {
+  if (incoming.turnAngle < MEDIUM_TURN_DEGREES) {
+    return null;
+  }
+
+  const minimumDistance = incoming.turnSourceDistance
+    + STATION_TURN_MIN_OFFSET_METERS;
+  const maximumDistance = incoming.turnSourceDistance
+    + STATION_TURN_MAX_OFFSET_METERS;
+
+  return candidates
+    .filter(candidate => candidate.reasons.has("station"))
+    .filter(candidate => {
+      return candidate.distanceAlongRoute >= minimumDistance
+        && candidate.distanceAlongRoute <= maximumDistance
+        && Math.abs(candidate.distanceAlongRoute - incoming.distanceAlongRoute)
+          <= STATION_TURN_TARGET_TOLERANCE_METERS;
+    })
+    .sort((first, second) => {
+      return Math.abs(first.distanceAlongRoute - incoming.distanceAlongRoute)
+        - Math.abs(second.distanceAlongRoute - incoming.distanceAlongRoute);
+    })[0] ?? null;
+}
+
+function mergeCandidate(existing, incoming) {
+  const boundaryWouldAbsorbCoverage = existing.reasons.size === 1
+    && existing.reasons.has("segment-boundary")
+    && incoming.reasons.has("coverage");
+
+  for (const reason of incoming.reasons) {
+    existing.reasons.add(reason);
+  }
+
+  existing.nearSegmentBoundary ||= incoming.nearSegmentBoundary;
+  existing.selectable ||= incoming.selectable;
+
+  if (boundaryWouldAbsorbCoverage) {
+    existing.lat = incoming.lat;
+    existing.lng = incoming.lng;
+    existing.distanceAlongRoute = incoming.distanceAlongRoute;
+    existing.turnAngle = incoming.turnAngle;
+    existing.turnSourceDistance = incoming.turnSourceDistance;
+    existing.turnZoneId = incoming.turnZoneId;
+    return;
+  }
+
+  if (incoming.turnAngle > existing.turnAngle) {
+    existing.turnAngle = incoming.turnAngle;
+    existing.turnSourceDistance = incoming.turnSourceDistance;
+    existing.turnZoneId = incoming.turnZoneId;
+
+    if (!existing.reasons.has("station")) {
+      existing.distanceAlongRoute = incoming.distanceAlongRoute;
+      existing.lat = incoming.lat;
+      existing.lng = incoming.lng;
+    }
+  }
+}
+
+function addCandidate(candidates, incoming) {
+  const incomingReasons = new Set(incoming.reasons);
+  const incomingIsStation = incomingReasons.has("station");
+  const incomingIsTurn = incomingReasons.has("post-turn");
+  let existing = incomingIsTurn
+    ? stationForTurn(candidates, incoming)
+    : null;
 
   if (!existing) {
     existing = candidates.find(candidate => {
       const existingIsStation = candidate.reasons.has("station");
+      const weakPostTurnWouldAbsorbCoverage = incomingReasons.has("coverage")
+        && candidate.reasons.has("post-turn")
+        && candidate.turnAngle < MEDIUM_TURN_DEGREES;
 
-      if (incomingIsStation && existingIsStation) {
+      if (
+        incomingIsStation
+        || existingIsStation
+        || weakPostTurnWouldAbsorbCoverage
+      ) {
         return false;
       }
 
@@ -65,37 +152,15 @@ function addCandidate(candidates, incoming) {
   if (!existing) {
     candidates.push({
       ...incoming,
-      reasons: new Set(incoming.reasons)
+      reasons: incomingReasons
     });
     return;
   }
 
-  for (const reason of incoming.reasons) {
-    existing.reasons.add(reason);
-  }
-
-  existing.nearSegmentBoundary ||= incoming.nearSegmentBoundary;
-
-  if (incoming.reasons.includes("station")) {
-    existing.lat = incoming.lat;
-    existing.lng = incoming.lng;
-    existing.distanceAlongRoute = incoming.distanceAlongRoute;
-    existing.stationName = incoming.stationName;
-    existing.stationIndex = incoming.stationIndex;
-    existing.distanceToRoute = incoming.distanceToRoute;
-    existing.projectedToRoute = incoming.projectedToRoute;
-  }
-
-  if (incoming.turnAngle > existing.turnAngle) {
-    existing.turnAngle = incoming.turnAngle;
-    existing.turnSourceDistance = incoming.turnSourceDistance;
-
-    if (!existing.reasons.has("station")) {
-      existing.distanceAlongRoute = incoming.distanceAlongRoute;
-      existing.lat = incoming.lat;
-      existing.lng = incoming.lng;
-    }
-  }
+  mergeCandidate(existing, {
+    ...incoming,
+    reasons: incomingReasons
+  });
 }
 
 function buildCandidates(geometry, samples, startDistance, endDistance, stationConstraints) {
@@ -116,6 +181,7 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
     }
 
     const routePoint = pointAlongRoute(geometry, station.distanceAlongRoute);
+    const angle = turnAngleAt(geometry, routePoint.distanceAlongRoute);
     const projectedToRoute = station.projectedToRoute
       || routePoint.lat !== station.lat
       || routePoint.lng !== station.lng;
@@ -124,8 +190,9 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
       lat: routePoint.lat,
       lng: routePoint.lng,
       distanceAlongRoute: routePoint.distanceAlongRoute,
-      turnAngle: turnAngleAt(geometry, routePoint.distanceAlongRoute),
+      turnAngle: angle,
       turnSourceDistance: null,
+      turnZoneId: null,
       nearSegmentBoundary: geometry.boundaryDistances.some(boundary => {
         return Math.abs(boundary - routePoint.distanceAlongRoute)
           <= CANDIDATE_MERGE_METERS;
@@ -134,6 +201,7 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
       stationIndex: station.stationIndex,
       distanceToRoute: station.distanceToRoute,
       projectedToRoute,
+      selectable: angle >= MEDIUM_TURN_DEGREES,
       reasons: ["station"]
     });
   }
@@ -147,7 +215,7 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
 
     const distance = samples[index].distanceAlongRoute;
     const localMaximum = samples.every((sample, otherIndex) => {
-      if (Math.abs(sample.distanceAlongRoute - distance) > 90) {
+      if (Math.abs(sample.distanceAlongRoute - distance) > TURN_PEAK_WINDOW_METERS) {
         return true;
       }
 
@@ -165,9 +233,12 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
       ...shifted,
       turnAngle: angle,
       turnSourceDistance: distance,
+      turnZoneId: `turn-${Math.round(distance)}`,
       nearSegmentBoundary: geometry.boundaryDistances.some(boundary => {
-        return Math.abs(boundary - shiftedDistance) <= CANDIDATE_MERGE_METERS;
+        return Math.abs(boundary - shifted.distanceAlongRoute)
+          <= CANDIDATE_MERGE_METERS;
       }),
+      selectable: true,
       reasons: ["post-turn"]
     });
   }
@@ -181,9 +252,11 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
 
     addCandidate(candidates, {
       ...point,
-      turnAngle: turnAngleAt(geometry, boundaryDistance),
+      turnAngle: turnAngleAt(geometry, point.distanceAlongRoute),
       turnSourceDistance: null,
+      turnZoneId: null,
       nearSegmentBoundary: true,
+      selectable: true,
       reasons: ["segment-boundary"]
     });
   }
@@ -199,13 +272,63 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
 
     addCandidate(candidates, {
       ...point,
-      turnAngle: turnAngleAt(geometry, distance),
+      turnAngle: turnAngleAt(geometry, point.distanceAlongRoute),
       turnSourceDistance: null,
+      turnZoneId: null,
       nearSegmentBoundary: geometry.boundaryDistances.some(boundary => {
-        return Math.abs(boundary - distance) <= CANDIDATE_MERGE_METERS;
+        return Math.abs(boundary - point.distanceAlongRoute)
+          <= CANDIDATE_MERGE_METERS;
       }),
+      selectable: true,
       reasons: ["coverage"]
     });
+  }
+
+  const turnSources = candidates
+    .filter(candidate => candidate.reasons.has("post-turn"))
+    .filter(candidate => candidate.turnAngle >= MEDIUM_TURN_DEGREES)
+    .map(candidate => candidate.turnSourceDistance);
+
+  for (const candidate of candidates) {
+    if (
+      candidate.reasons.size === 1
+      && candidate.reasons.has("segment-boundary")
+    ) {
+      candidate.selectable = false;
+      candidate.boundaryOnly = true;
+    }
+
+    if (
+      candidate.reasons.has("post-turn")
+      && candidate.turnAngle < MEDIUM_TURN_DEGREES
+      && !candidate.reasons.has("coverage")
+      && !candidate.reasons.has("station")
+    ) {
+      candidate.selectable = false;
+      candidate.weakTurnOnly = true;
+    }
+
+    if (candidate.reasons.has("post-turn")) {
+      continue;
+    }
+
+    const nearestTurnSource = turnSources
+      .map(distance => ({
+        distance,
+        offset: candidate.distanceAlongRoute - distance,
+        separation: Math.abs(candidate.distanceAlongRoute - distance)
+      }))
+      .filter(match => {
+        return match.offset > -TURN_DECISION_ZONE_BEFORE_METERS
+          && match.offset < TURN_DECISION_ZONE_AFTER_METERS;
+      })
+      .sort((first, second) => first.separation - second.separation)[0];
+
+    if (nearestTurnSource) {
+      candidate.selectable = false;
+      candidate.nearTurnDecisionPoint = true;
+      candidate.nearestTurnSourceDistance = nearestTurnSource.distance;
+    }
   }
 
   return candidates
@@ -215,9 +338,25 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
     .map((candidate, index) => ({
       ...candidate,
       id: index,
+      turnClass: turnClass(candidate.turnAngle),
+      protectedTurn: false,
       selected: false,
       selectionOrder: null,
-      selectionScore: null
+      selectionScore: null,
+      selectionPhase: null,
+      selectionEvaluation: null,
+      finalEvaluation: null,
+      rejectionReason: candidate.selectable
+        ? null
+        : candidate.nearTurnDecisionPoint
+          ? "junction-proximity"
+          : candidate.boundaryOnly
+            ? "boundary-only"
+            : candidate.weakTurnOnly
+              ? "weak-turn"
+              : "weak-station",
+      replacedCandidateId: null,
+      replacedByCandidateId: null
     }));
 }
 
@@ -240,6 +379,25 @@ function maximumControlGap(controlDistances) {
   }
 
   return maximum;
+}
+
+function candidateTurnFidelity(candidate) {
+  const isTurnCandidate = candidate.reasons.has("post-turn")
+    || candidate.reasons.has("station");
+
+  return isTurnCandidate ? clamp(candidate.turnAngle / 90, 0, 1) : 0;
+}
+
+function requiredSpacing(candidate, minSpacing) {
+  if (candidate.reasons.has("post-turn") && candidate.turnClass === "strong") {
+    return minSpacing / 2;
+  }
+
+  if (candidate.reasons.has("post-turn") && candidate.turnClass === "medium") {
+    return minSpacing * 0.7;
+  }
+
+  return minSpacing;
 }
 
 function evaluateCandidate({
@@ -269,31 +427,38 @@ function evaluateCandidate({
     0,
     1
   );
-  const coverageGain = clamp(
-    (currentMaximumGap - trialMaximumGap) / Math.max(currentMaximumGap, 1),
-    0,
-    1
-  );
   const rootMeanSquareReduction = clamp(
     (currentMetrics.rootMeanSquareDeviation - trialMetrics.rootMeanSquareDeviation)
       / Math.max(currentMetrics.rootMeanSquareDeviation, 1),
     0,
     1
   );
-  const turnFidelity = candidate.reasons.has("post-turn")
-    ? clamp(candidate.turnAngle / 90, 0, 1)
-    : 0;
-  const requiredSpacing = turnFidelity >= 0.5 ? minSpacing / 2 : minSpacing;
-  const score = maxDeviationReduction * 0.40
-    + percentile95Reduction * 0.20
-    + rootMeanSquareReduction * 0.20
-    + coverageGain * 0.15
-    + turnFidelity * 0.10;
+  const coverageGain = clamp(
+    (currentMaximumGap - trialMaximumGap) / Math.max(currentMaximumGap, 1),
+    0,
+    1
+  );
+  const turnFidelity = candidateTurnFidelity(candidate);
+  const score = turnFidelity * 0.35
+    + maxDeviationReduction * 0.25
+    + percentile95Reduction * 0.15
+    + rootMeanSquareReduction * 0.10
+    + coverageGain * 0.15;
+  const strongTurnScore = turnFidelity * 0.65
+    + maxDeviationReduction * 0.15
+    + percentile95Reduction * 0.10
+    + coverageGain * 0.10;
+  const coverageScore = maxDeviationReduction * 0.35
+    + percentile95Reduction * 0.25
+    + rootMeanSquareReduction * 0.15
+    + coverageGain * 0.25;
 
   return {
     score,
+    strongTurnScore,
+    coverageScore,
     nearestDistance,
-    requiredSpacing,
+    requiredSpacing: requiredSpacing(candidate, minSpacing),
     trialMetrics,
     trialMaximumGap,
     components: {
@@ -302,9 +467,467 @@ function evaluateCandidate({
       rootMeanSquareReduction,
       coverageGain,
       turnFidelity,
-      stationPreference: candidate.reasons.has("station") ? 1 : 0
+      stationPreference: 0
     }
   };
+}
+
+function controlsFor(selected, startDistance, endDistance) {
+  return [
+    startDistance,
+    endDistance,
+    ...selected.map(candidate => candidate.distanceAlongRoute)
+  ];
+}
+
+function spacingEligible(candidate, selected, startDistance, endDistance, minSpacing) {
+  const ownSpacing = requiredSpacing(candidate, minSpacing);
+
+  if (
+    Math.abs(candidate.distanceAlongRoute - startDistance) < ownSpacing
+    || Math.abs(endDistance - candidate.distanceAlongRoute) < ownSpacing
+  ) {
+    return false;
+  }
+
+  return selected.every(existing => {
+    const spacing = Math.min(
+      ownSpacing,
+      requiredSpacing(existing, minSpacing)
+    );
+
+    return Math.abs(existing.distanceAlongRoute - candidate.distanceAlongRoute)
+      >= spacing;
+  });
+}
+
+function evaluateAgainstSelection({
+  candidate,
+  selected,
+  geometry,
+  samples,
+  startDistance,
+  endDistance,
+  minSpacing
+}) {
+  const controlDistances = controlsFor(selected, startDistance, endDistance);
+  const currentMetrics = measureControlPath(geometry, controlDistances, samples);
+  const currentMaximumGap = maximumControlGap(controlDistances);
+
+  return evaluateCandidate({
+    candidate,
+    geometry,
+    samples,
+    controlDistances,
+    currentMetrics,
+    currentMaximumGap,
+    minSpacing
+  });
+}
+
+function markSelected(candidate, evaluation, phase, order) {
+  candidate.selected = true;
+  candidate.selectionOrder = order;
+  candidate.selectionScore = phase === "strong-turn"
+    ? evaluation.strongTurnScore
+    : phase === "coverage"
+      ? evaluation.coverageScore
+      : evaluation.score;
+  candidate.selectionPhase = phase;
+  candidate.selectionEvaluation = evaluation;
+  candidate.protectedTurn = phase === "strong-turn";
+  candidate.rejectionReason = null;
+}
+
+function selectStrongTurns(context, strongTurnBudget) {
+  const {
+    candidates,
+    selected,
+    maxWaypoints,
+    startDistance,
+    endDistance,
+    minSpacing
+  } = context;
+
+  while (
+    selected.length < maxWaypoints
+    && selected.length < strongTurnBudget
+  ) {
+    const available = candidates
+      .filter(candidate => candidate.selectable)
+      .filter(candidate => !candidate.selected)
+      .filter(isStrongTurnCandidate)
+      .filter(candidate => {
+        return spacingEligible(
+          candidate,
+          selected,
+          startDistance,
+          endDistance,
+          minSpacing
+        );
+      });
+
+    if (!available.length) {
+      break;
+    }
+
+    const evaluated = available.map(candidate => ({
+      candidate,
+      evaluation: evaluateAgainstSelection({ candidate, selected, ...context })
+    }));
+    const choice = evaluated.sort((first, second) => {
+      return second.evaluation.strongTurnScore - first.evaluation.strongTurnScore
+        || second.candidate.turnAngle - first.candidate.turnAngle;
+    })[0];
+
+    markSelected(
+      choice.candidate,
+      choice.evaluation,
+      "strong-turn",
+      selected.length + 1
+    );
+    selected.push(choice.candidate);
+  }
+}
+
+function fillCoverageFloor(context, coverageFloor) {
+  const {
+    candidates,
+    selected,
+    maxWaypoints,
+    startDistance,
+    endDistance,
+    minSpacing
+  } = context;
+  let added = 0;
+
+  while (added < coverageFloor && selected.length < maxWaypoints) {
+    const available = candidates
+      .filter(candidate => candidate.selectable)
+      .filter(candidate => !candidate.selected)
+      .filter(candidate => !candidate.protectedTurn)
+      .filter(candidate => {
+        return spacingEligible(
+          candidate,
+          selected,
+          startDistance,
+          endDistance,
+          minSpacing
+        );
+      });
+
+    if (!available.length) {
+      break;
+    }
+
+    const evaluated = available.map(candidate => ({
+      candidate,
+      evaluation: evaluateAgainstSelection({ candidate, selected, ...context })
+    }));
+    const choice = evaluated.sort((first, second) => {
+      return second.evaluation.coverageScore - first.evaluation.coverageScore
+        || second.evaluation.nearestDistance - first.evaluation.nearestDistance;
+    })[0];
+
+    markSelected(
+      choice.candidate,
+      choice.evaluation,
+      "coverage",
+      selected.length + 1
+    );
+    selected.push(choice.candidate);
+    added += 1;
+  }
+}
+
+function isSignificant(candidate, evaluation) {
+  const components = evaluation.components;
+  const meaningfulChange = candidate.turnClass === "medium"
+    || candidate.turnClass === "strong"
+    || components.maxDeviationReduction >= MIN_GEOMETRY_REDUCTION
+    || components.percentile95Reduction >= MIN_GEOMETRY_REDUCTION
+    || components.rootMeanSquareReduction >= MIN_GEOMETRY_REDUCTION
+    || components.coverageGain >= MIN_GAP_REDUCTION;
+
+  return evaluation.score >= MIN_SIGNIFICANCE_SCORE && meaningfulChange;
+}
+
+function fillRemainingSlots(context) {
+  const {
+    candidates,
+    selected,
+    maxWaypoints,
+    startDistance,
+    endDistance,
+    minSpacing
+  } = context;
+  let stoppedForSignificance = false;
+
+  while (selected.length < maxWaypoints) {
+    const available = candidates
+      .filter(candidate => candidate.selectable)
+      .filter(candidate => !candidate.selected)
+      .filter(candidate => {
+        return spacingEligible(
+          candidate,
+          selected,
+          startDistance,
+          endDistance,
+          minSpacing
+        );
+      });
+
+    if (!available.length) {
+      break;
+    }
+
+    const evaluated = available.map(candidate => ({
+      candidate,
+      evaluation: evaluateAgainstSelection({ candidate, selected, ...context })
+    }));
+    const currentMetrics = measureControlPath(
+      context.geometry,
+      controlsFor(selected, startDistance, endDistance),
+      context.samples
+    );
+    const geometryNeedsHelp = currentMetrics.maxDeviation
+      > MAX_ACCEPTABLE_DEVIATION_METERS
+      || currentMetrics.percentile95Deviation > P95_ACCEPTABLE_DEVIATION_METERS;
+    const choice = evaluated.sort((first, second) => {
+      const firstScore = geometryNeedsHelp
+        ? first.evaluation.coverageScore
+        : first.evaluation.score;
+      const secondScore = geometryNeedsHelp
+        ? second.evaluation.coverageScore
+        : second.evaluation.score;
+
+      return secondScore - firstScore
+        || second.evaluation.nearestDistance - first.evaluation.nearestDistance;
+    })[0];
+
+    if (
+      !geometryNeedsHelp
+      && !isSignificant(choice.candidate, choice.evaluation)
+    ) {
+      stoppedForSignificance = true;
+      break;
+    }
+
+    markSelected(
+      choice.candidate,
+      choice.evaluation,
+      geometryNeedsHelp ? "geometry" : "fidelity",
+      selected.length + 1
+    );
+    selected.push(choice.candidate);
+  }
+
+  return stoppedForSignificance;
+}
+
+function normalizedReduction(before, after) {
+  return clamp((before - after) / Math.max(before, 1), 0, 1);
+}
+
+function turnZones(candidates) {
+  const zones = new Map();
+
+  for (const candidate of candidates) {
+    if (
+      !candidate.turnZoneId
+      || candidate.turnAngle < STRONG_TURN_DEGREES
+    ) {
+      continue;
+    }
+
+    const fidelity = clamp(candidate.turnAngle / 90, 0, 1);
+    zones.set(candidate.turnZoneId, Math.max(zones.get(candidate.turnZoneId) ?? 0, fidelity));
+  }
+
+  return zones;
+}
+
+function objectiveForSelection(context, selected, baseline) {
+  const {
+    candidates,
+    geometry,
+    samples,
+    startDistance,
+    endDistance
+  } = context;
+  const controlDistances = controlsFor(selected, startDistance, endDistance);
+  const metrics = measureControlPath(geometry, controlDistances, samples);
+  const maximumGap = maximumControlGap(controlDistances);
+  const zones = turnZones(candidates);
+  const totalTurnValue = [...zones.values()].reduce((sum, value) => sum + value, 0);
+  const coveredZones = new Set(selected
+    .map(candidate => candidate.turnZoneId)
+    .filter(Boolean));
+  const coveredTurnValue = [...coveredZones].reduce((sum, zoneId) => {
+    return sum + (zones.get(zoneId) ?? 0);
+  }, 0);
+  const turnCoverage = totalTurnValue
+    ? coveredTurnValue / totalTurnValue
+    : 0;
+  const maxDeviationQuality = normalizedReduction(
+    baseline.metrics.maxDeviation,
+    metrics.maxDeviation
+  );
+  const percentile95Quality = normalizedReduction(
+    baseline.metrics.percentile95Deviation,
+    metrics.percentile95Deviation
+  );
+  const rootMeanSquareQuality = normalizedReduction(
+    baseline.metrics.rootMeanSquareDeviation,
+    metrics.rootMeanSquareDeviation
+  );
+  const gapQuality = normalizedReduction(baseline.maximumGap, maximumGap);
+
+  return {
+    score: turnCoverage * 0.20
+      + maxDeviationQuality * 0.35
+      + percentile95Quality * 0.25
+      + rootMeanSquareQuality * 0.15
+      + gapQuality * 0.05,
+    metrics,
+    maximumGap,
+    components: {
+      turnCoverage,
+      maxDeviationQuality,
+      percentile95Quality,
+      rootMeanSquareQuality,
+      gapQuality
+    }
+  };
+}
+
+function optimizeWithSwaps(context) {
+  const {
+    candidates,
+    selected,
+    geometry,
+    samples,
+    startDistance,
+    endDistance,
+    minSpacing,
+    maxWaypoints,
+    strongTurnBudget
+  } = context;
+
+  if (!selected.length || selected.length < maxWaypoints) {
+    return;
+  }
+
+  const baselineControls = [startDistance, endDistance];
+  const baseline = {
+    metrics: measureControlPath(geometry, baselineControls, samples),
+    maximumGap: maximumControlGap(baselineControls)
+  };
+  let currentObjective = objectiveForSelection(context, selected, baseline);
+
+  for (let iteration = 0; iteration < maxWaypoints; iteration += 1) {
+    let bestSwap = null;
+
+    for (const incoming of candidates) {
+      if (!incoming.selectable || incoming.selected) {
+        continue;
+      }
+
+      const selectedStrongTurns = selected.filter(isStrongTurnCandidate).length;
+
+      if (
+        isStrongTurnCandidate(incoming)
+        && selectedStrongTurns >= strongTurnBudget
+      ) {
+        const canReplaceStrongTurn = selected.some(candidate => {
+          return candidate.protectedTurn && isStrongTurnCandidate(candidate);
+        });
+
+        if (!canReplaceStrongTurn) {
+          continue;
+        }
+      }
+
+      for (const outgoing of selected) {
+        const replacingProtectedTurn = outgoing.protectedTurn;
+
+        if (
+          replacingProtectedTurn
+          && !isStrongTurnCandidate(incoming)
+        ) {
+          continue;
+        }
+
+        if (
+          isStrongTurnCandidate(incoming)
+          && selectedStrongTurns >= strongTurnBudget
+          && !isStrongTurnCandidate(outgoing)
+        ) {
+          continue;
+        }
+
+        const remaining = selected.filter(candidate => candidate !== outgoing);
+
+        if (!spacingEligible(
+          incoming,
+          remaining,
+          startDistance,
+          endDistance,
+          minSpacing
+        )) {
+          continue;
+        }
+
+        const trial = [...remaining, incoming];
+        const objective = objectiveForSelection(context, trial, baseline);
+        const improvement = objective.score - currentObjective.score;
+        const geometryDoesNotRegress = objective.metrics.maxDeviation
+          <= currentObjective.metrics.maxDeviation + 1
+          && objective.metrics.percentile95Deviation
+            <= currentObjective.metrics.percentile95Deviation + 1;
+
+        if (
+          geometryDoesNotRegress
+          && improvement >= MIN_SWAP_IMPROVEMENT
+          && (!bestSwap || improvement > bestSwap.improvement)
+        ) {
+          bestSwap = {
+            incoming,
+            outgoing,
+            replacingProtectedTurn,
+            remaining,
+            objective,
+            improvement
+          };
+        }
+      }
+    }
+
+    if (!bestSwap) {
+      break;
+    }
+
+    const outgoingIndex = selected.indexOf(bestSwap.outgoing);
+    const evaluation = evaluateAgainstSelection({
+      candidate: bestSwap.incoming,
+      selected: bestSwap.remaining,
+      ...context
+    });
+
+    bestSwap.outgoing.selected = false;
+    bestSwap.outgoing.rejectionReason = "replaced";
+    bestSwap.outgoing.replacedByCandidateId = bestSwap.incoming.id;
+    bestSwap.incoming.replacedCandidateId = bestSwap.outgoing.id;
+    markSelected(
+      bestSwap.incoming,
+      evaluation,
+      "swap",
+      bestSwap.outgoing.selectionOrder
+    );
+    bestSwap.incoming.protectedTurn = bestSwap.replacingProtectedTurn;
+    selected[outgoingIndex] = bestSwap.incoming;
+    currentObjective = bestSwap.objective;
+  }
 }
 
 function reasonFor(candidate) {
@@ -320,6 +943,13 @@ function reasonFor(candidate) {
     return "post-turn";
   }
 
+  if (
+    candidate.reasons.has("coverage")
+    && candidate.reasons.has("segment-boundary")
+  ) {
+    return "coverage+segment-boundary";
+  }
+
   if (candidate.reasons.has("segment-boundary")) {
     return "segment-boundary";
   }
@@ -327,29 +957,19 @@ function reasonFor(candidate) {
   return "coverage";
 }
 
-function choosePreferredCandidate(evaluated) {
-  const ordered = [...evaluated].sort((first, second) => {
-    return second.evaluation.score - first.evaluation.score
-      || Number(second.candidate.reasons.has("station"))
-        - Number(first.candidate.reasons.has("station"))
-      || second.evaluation.nearestDistance - first.evaluation.nearestDistance;
-  });
-  const best = ordered[0];
-
-  if (!best || best.candidate.reasons.has("station")) {
-    return best;
+function publicEvaluation(evaluation) {
+  if (!evaluation) {
+    return null;
   }
 
-  const bestStation = ordered.find(item => item.candidate.reasons.has("station"));
-
-  if (
-    bestStation
-    && bestStation.evaluation.score >= best.evaluation.score * STATION_PREFERENCE_RATIO
-  ) {
-    return bestStation;
-  }
-
-  return best;
+  return {
+    score: evaluation.score,
+    strongTurnScore: evaluation.strongTurnScore,
+    coverageScore: evaluation.coverageScore,
+    nearestDistance: evaluation.nearestDistance,
+    requiredSpacing: evaluation.requiredSpacing,
+    componentScores: evaluation.components
+  };
 }
 
 export function selectWaypoints(geometry, {
@@ -374,111 +994,28 @@ export function selectWaypoints(geometry, {
   );
   const coverageFloor = minimumCoverageCount(remainingLength, maxWaypoints);
   const selected = [];
-  let stoppedForSignificance = false;
-
-  while (selected.length < maxWaypoints) {
-    const controlDistances = [
-      startDistance,
-      endDistance,
-      ...selected.map(candidate => candidate.distanceAlongRoute)
-    ];
-    const currentMetrics = measureControlPath(geometry, controlDistances, samples);
-    const currentMaximumGap = maximumControlGap(controlDistances);
-    const spacingEligible = candidates.filter(candidate => {
-      if (candidate.selected) {
-        return false;
-      }
-
-      const turnFidelity = candidate.reasons.has("post-turn")
-        ? clamp(candidate.turnAngle / 90, 0, 1)
-        : 0;
-      const requiredSpacing = turnFidelity >= 0.5 ? minSpacing / 2 : minSpacing;
-
-      return controlDistances.every(distance => {
-        return Math.abs(distance - candidate.distanceAlongRoute)
-          >= requiredSpacing;
-      });
-    });
-    const fallbackStations = candidates.filter(candidate => {
-      return !candidate.selected
-        && candidate.reasons.has("station")
-        && controlDistances.every(distance => {
-          return Math.abs(distance - candidate.distanceAlongRoute) >= 30;
-        });
-    });
-    const available = spacingEligible.length ? spacingEligible : fallbackStations;
-    const stationAvailable = available.some(candidate => {
-      return candidate.reasons.has("station");
-    });
-    const geometryNeedsHelp = currentMetrics.maxDeviation
-      > MAX_ACCEPTABLE_DEVIATION_METERS
-      || currentMetrics.percentile95Deviation > P95_ACCEPTABLE_DEVIATION_METERS;
-
-    if (!available.length) {
-      break;
-    }
-
-    if (selected.length >= coverageFloor && !stationAvailable && !geometryNeedsHelp) {
-      stoppedForSignificance = true;
-      break;
-    }
-
-    const evaluated = available.map(candidate => ({
-      candidate,
-      evaluation: evaluateCandidate({
-        candidate,
-        geometry,
-        samples,
-        controlDistances,
-        currentMetrics,
-        currentMaximumGap,
-        minSpacing
-      })
-    }));
-    const choice = choosePreferredCandidate(evaluated);
-
-    choice.candidate.selected = true;
-    choice.candidate.selectionOrder = selected.length + 1;
-    choice.candidate.selectionScore = choice.evaluation.score;
-    selected.push(choice.candidate);
-  }
-
-  selected.sort((first, second) => first.distanceAlongRoute - second.distanceAlongRoute);
-
-  const finalAnchors = [
+  const strongTurnBudget = Math.min(
+    maxWaypoints,
+    maxWaypoints <= 3 ? maxWaypoints : Math.ceil(maxWaypoints / 3)
+  );
+  const context = {
+    candidates,
+    selected,
+    geometry,
+    samples,
     startDistance,
     endDistance,
-    ...selected.map(candidate => candidate.distanceAlongRoute)
-  ];
-  const finalBaseMetrics = measureControlPath(geometry, finalAnchors, samples);
-  const finalMaximumGap = maximumControlGap(finalAnchors);
+    minSpacing,
+    maxWaypoints,
+    strongTurnBudget
+  };
 
-  for (const candidate of candidates) {
-    candidate.finalEvaluation = evaluateCandidate({
-      candidate,
-      geometry,
-      samples,
-      controlDistances: finalAnchors,
-      currentMetrics: finalBaseMetrics,
-      currentMaximumGap: finalMaximumGap,
-      minSpacing
-    });
+  selectStrongTurns(context, strongTurnBudget);
+  fillCoverageFloor(context, coverageFloor);
+  const stoppedForSignificance = fillRemainingSlots(context);
+  optimizeWithSwaps(context);
 
-    if (!candidate.selected) {
-      if (
-        candidate.finalEvaluation.nearestDistance
-          < candidate.finalEvaluation.requiredSpacing
-      ) {
-        candidate.rejectionReason = "too-close";
-      } else if (selected.length >= maxWaypoints) {
-        candidate.rejectionReason = "max-waypoints";
-      } else if (stoppedForSignificance) {
-        candidate.rejectionReason = "below-significance";
-      } else {
-        candidate.rejectionReason = "not-selected";
-      }
-    }
-  }
+  selected.sort((first, second) => first.distanceAlongRoute - second.distanceAlongRoute);
 
   for (const candidate of candidates) {
     const routePoint = pointAlongRoute(geometry, candidate.distanceAlongRoute);
@@ -491,11 +1028,45 @@ export function selectWaypoints(geometry, {
     if (candidate.reasons.has("station") && moved) {
       candidate.projectedToRoute = true;
     }
+
+    const comparisonSelection = candidate.selected
+      ? selected.filter(existing => existing !== candidate)
+      : selected;
+
+    candidate.finalEvaluation = evaluateAgainstSelection({
+      candidate,
+      selected: comparisonSelection,
+      ...context
+    });
+
+    if (candidate.selected || !candidate.selectable) {
+      continue;
+    }
+
+    if (candidate.rejectionReason === "replaced") {
+      continue;
+    }
+
+    if (!spacingEligible(
+      candidate,
+      selected,
+      startDistance,
+      endDistance,
+      minSpacing
+    )) {
+      candidate.rejectionReason = "too-close";
+    } else if (selected.length >= maxWaypoints) {
+      candidate.rejectionReason = "max-waypoints";
+    } else if (stoppedForSignificance) {
+      candidate.rejectionReason = "below-significance";
+    } else {
+      candidate.rejectionReason = "not-selected";
+    }
   }
 
   const finalMetrics = measureControlPath(
     geometry,
-    [startDistance, ...selected.map(item => item.distanceAlongRoute), endDistance],
+    controlsFor(selected, startDistance, endDistance),
     samples
   );
 
@@ -525,12 +1096,26 @@ export function selectWaypoints(geometry, {
       score: candidate.selected
         ? candidate.selectionScore
         : candidate.finalEvaluation.score,
-      componentScores: candidate.finalEvaluation.components,
+      componentScores: candidate.selected
+        ? candidate.selectionEvaluation.components
+        : candidate.finalEvaluation.components,
       turnAngle: candidate.turnAngle,
+      turnClass: candidate.turnClass,
+      turnSourceDistance: candidate.turnSourceDistance,
+      protectedTurn: candidate.protectedTurn,
+      selectionPhase: candidate.selectionPhase,
+      selectionEvaluation: publicEvaluation(candidate.selectionEvaluation),
+      finalEvaluation: publicEvaluation(candidate.finalEvaluation),
       nearSegmentBoundary: candidate.nearSegmentBoundary,
+      boundaryOnly: candidate.boundaryOnly ?? false,
+      weakTurnOnly: candidate.weakTurnOnly ?? false,
+      nearTurnDecisionPoint: candidate.nearTurnDecisionPoint ?? false,
+      nearestTurnSourceDistance: candidate.nearestTurnSourceDistance ?? null,
       selected: candidate.selected,
       selectionOrder: candidate.selectionOrder,
-      rejectionReason: candidate.rejectionReason ?? null,
+      rejectionReason: candidate.rejectionReason,
+      replacedCandidateId: candidate.replacedCandidateId,
+      replacedByCandidateId: candidate.replacedByCandidateId,
       reason: candidate.selected ? reasonFor(candidate) : [...candidate.reasons].join("+"),
       roles: [...candidate.reasons],
       stationName: candidate.stationName ?? null,
