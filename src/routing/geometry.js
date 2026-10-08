@@ -85,6 +85,7 @@ export function buildRouteGeometry(line) {
   const rawPointCount = segments.reduce((sum, segment) => sum + segment.length, 0);
   const points = [];
   const cumulativeDistances = [];
+  const routeEdges = [];
   const boundaryDistances = [];
   let totalLength = 0;
 
@@ -102,10 +103,13 @@ export function buildRouteGeometry(line) {
       }
     }
 
-    for (const point of segment) {
+    for (let pointIndex = 0; pointIndex < segment.length; pointIndex += 1) {
+      const point = segment[pointIndex];
+
       if (!points.length) {
         points.push(point);
         cumulativeDistances.push(0);
+        routeEdges.push(false);
         continue;
       }
 
@@ -118,6 +122,7 @@ export function buildRouteGeometry(line) {
       totalLength += distance;
       points.push(point);
       cumulativeDistances.push(totalLength);
+      routeEdges.push(!(segmentIndex > 0 && pointIndex === 0));
     }
 
     if (segmentIndex < segments.length - 1) {
@@ -134,6 +139,7 @@ export function buildRouteGeometry(line) {
   return {
     points,
     cumulativeDistances,
+    routeEdges,
     boundaryDistances,
     totalLength,
     rawPointCount,
@@ -179,6 +185,17 @@ export function pointAlongRoute(geometry, distanceAlongRoute) {
 
   const previousDistance = cumulative[low - 1];
   const nextDistance = cumulative[low];
+
+  if (!geometry.routeEdges[low]) {
+    const usePrevious = distance - previousDistance <= nextDistance - distance;
+    const index = usePrevious ? low - 1 : low;
+
+    return {
+      ...geometry.points[index],
+      distanceAlongRoute: cumulative[index]
+    };
+  }
+
   const span = nextDistance - previousDistance;
   const ratio = span > 0 ? (distance - previousDistance) / span : 0;
   const previous = geometry.points[low - 1];
@@ -195,10 +212,19 @@ export function resampleRoute(geometry, spacingMeters = 30) {
   const points = [];
 
   for (let distance = 0; distance < geometry.totalLength; distance += spacingMeters) {
-    points.push(pointAlongRoute(geometry, distance));
+    const point = pointAlongRoute(geometry, distance);
+
+    if (points.at(-1)?.distanceAlongRoute !== point.distanceAlongRoute) {
+      points.push(point);
+    }
   }
 
-  points.push(pointAlongRoute(geometry, geometry.totalLength));
+  const finalPoint = pointAlongRoute(geometry, geometry.totalLength);
+
+  if (points.at(-1)?.distanceAlongRoute !== finalPoint.distanceAlongRoute) {
+    points.push(finalPoint);
+  }
+
   return points;
 }
 
@@ -226,6 +252,10 @@ export function findRoutePositionCandidates(geometry, coordinate) {
   const matches = [];
 
   for (let index = 1; index < geometry.points.length; index += 1) {
+    if (!geometry.routeEdges[index]) {
+      continue;
+    }
+
     const start = geometry.projector.project(geometry.points[index - 1]);
     const end = geometry.projector.project(geometry.points[index]);
     const match = projectToSegment(projectedCoordinate, start, end);

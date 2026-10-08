@@ -7,10 +7,7 @@ import {
   resampleRoute
 } from "../src/routing/geometry.js";
 import { selectWaypoints } from "../src/routing/waypoints.js";
-import {
-  coordinateForRouteMatch,
-  STOP_PROJECTION_THRESHOLD_METERS
-} from "../src/routing/stop-projection.js";
+import { coordinateForRouteMatch } from "../src/routing/stop-projection.js";
 
 test("parses lng-lat WKT, joins segments, and preserves boundaries", () => {
   const geometry = buildRouteGeometry(
@@ -48,6 +45,40 @@ test("resamples and interpolates by metres", () => {
   assert.equal(samples.at(-1).distanceAlongRoute, geometry.totalLength);
 });
 
+test("does not create waypoint positions on gaps between LINESTRING segments", () => {
+  const geometry = buildRouteGeometry(
+    "LINESTRING (29 41, 29.001 41)|LINESTRING (29.002 41, 29.003 41)"
+  );
+  const gapStart = geometry.cumulativeDistances[1];
+  const gapEnd = geometry.cumulativeDistances[2];
+  const gapMiddle = pointAlongRoute(geometry, (gapStart + gapEnd) / 2);
+  const gapCoordinate = { lat: 41, lng: 29.0015 };
+  const gapMatch = findClosestRoutePosition(geometry, gapCoordinate);
+  const selection = selectWaypoints(geometry, {
+    maxWaypoints: 1,
+    stationConstraints: [{
+      ...gapCoordinate,
+      distanceAlongRoute: (gapStart + gapEnd) / 2,
+      stationName: "GAP STOP",
+      stationIndex: 1,
+      distanceToRoute: gapMatch.distanceToRoute,
+      projectedToRoute: false
+    }]
+  });
+
+  assert.ok(
+    gapMiddle.distanceAlongRoute === gapStart
+      || gapMiddle.distanceAlongRoute === gapEnd
+  );
+  assert.ok(gapMatch.distanceToRoute > 30);
+  assert.equal(selection.waypoints.length, 1);
+
+  for (const waypoint of selection.waypoints) {
+    const match = findClosestRoutePosition(geometry, waypoint);
+    assert.ok(match.distanceToRoute < 0.01);
+  }
+});
+
 test("shifts an important turn forward and uses fewer than nine points on simple routes", () => {
   const turning = buildRouteGeometry(
     "LINESTRING (29 41, 29.01 41, 29.01 41.01, 29.02 41.01)"
@@ -83,18 +114,18 @@ test("finds route progress and detects a repeated route location", () => {
   assert.equal(ambiguous.ambiguous, true);
 });
 
-test("projects stop coordinates only after the route-distance tolerance", () => {
+test("always projects stop coordinates onto the IETT route", () => {
   const coordinate = { lat: 41.001, lng: 29.01 };
-  const routeMatch = { lat: 41, lng: 29.01 };
+  const routeMatch = {
+    lat: 41,
+    lng: 29.01,
+    distanceToRoute: 0
+  };
 
-  assert.deepEqual(coordinateForRouteMatch(coordinate, {
-    ...routeMatch,
-    distanceToRoute: STOP_PROJECTION_THRESHOLD_METERS
-  }), coordinate);
-  assert.deepEqual(coordinateForRouteMatch(coordinate, {
-    ...routeMatch,
-    distanceToRoute: STOP_PROJECTION_THRESHOLD_METERS + 0.01
-  }), routeMatch);
+  assert.deepEqual(coordinateForRouteMatch(coordinate, routeMatch), {
+    lat: routeMatch.lat,
+    lng: routeMatch.lng
+  });
 });
 
 test("keeps nearby stops distinct in the candidate pool", () => {

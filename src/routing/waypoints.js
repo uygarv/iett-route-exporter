@@ -115,19 +115,25 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
       continue;
     }
 
+    const routePoint = pointAlongRoute(geometry, station.distanceAlongRoute);
+    const projectedToRoute = station.projectedToRoute
+      || routePoint.lat !== station.lat
+      || routePoint.lng !== station.lng;
+
     addCandidate(candidates, {
-      lat: station.lat,
-      lng: station.lng,
-      distanceAlongRoute: station.distanceAlongRoute,
-      turnAngle: turnAngleAt(geometry, station.distanceAlongRoute),
+      lat: routePoint.lat,
+      lng: routePoint.lng,
+      distanceAlongRoute: routePoint.distanceAlongRoute,
+      turnAngle: turnAngleAt(geometry, routePoint.distanceAlongRoute),
       turnSourceDistance: null,
       nearSegmentBoundary: geometry.boundaryDistances.some(boundary => {
-        return Math.abs(boundary - station.distanceAlongRoute) <= CANDIDATE_MERGE_METERS;
+        return Math.abs(boundary - routePoint.distanceAlongRoute)
+          <= CANDIDATE_MERGE_METERS;
       }),
       stationName: station.stationName,
       stationIndex: station.stationIndex,
       distanceToRoute: station.distanceToRoute,
-      projectedToRoute: station.projectedToRoute,
+      projectedToRoute,
       reasons: ["station"]
     });
   }
@@ -471,6 +477,19 @@ export function selectWaypoints(geometry, {
       } else {
         candidate.rejectionReason = "not-selected";
       }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const routePoint = pointAlongRoute(geometry, candidate.distanceAlongRoute);
+    const moved = routePoint.lat !== candidate.lat || routePoint.lng !== candidate.lng;
+
+    candidate.lat = routePoint.lat;
+    candidate.lng = routePoint.lng;
+    candidate.distanceAlongRoute = routePoint.distanceAlongRoute;
+
+    if (candidate.reasons.has("station") && moved) {
+      candidate.projectedToRoute = true;
     }
   }
 
