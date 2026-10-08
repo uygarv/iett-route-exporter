@@ -344,8 +344,7 @@ curl -X POST http://localhost:3000/api/iett/routes/256_D_D0/travel-times \
   }'
 ```
 
-- `departureTime` accepts `"now"` or an ISO 8601 date time. When the value has no
-- time zone offset, TomTom interprets it in the origin's local time zone.
+- `departureTime` accepts `"now"` or an ISO 8601 date time. When the value has no time zone offset, TomTom interprets it in the origin's local time zone.
 - `dwellTimeSeconds` defaults to `20` and accepts integers from `0` through `600`.
 - The existing `currentLocation`, `startStation`, and `endStation` rules also apply.
 
