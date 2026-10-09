@@ -311,7 +311,8 @@ End stop can also be added to body. Example body:
 
 ## Use your current location
 
-When currentLocation field is provided, exported route will be initiated from this location. This removes the traveled portion and optimizes waypoints only for the remaining route.
+When `currentLocation` is provided, its coordinate is used to remove the
+already-traveled route section and optimize only the remaining waypoints.
 
 ```bash
 curl -X POST http://localhost:3000/api/iett/routes/256_G_D0/google-maps \

@@ -640,7 +640,8 @@ export function createIettService({
     const url = provider.buildUrl({
       origin,
       destination,
-      waypoints: selection.waypoints
+      waypoints: selection.waypoints,
+      useCurrentLocation: Boolean(options.currentLocation)
     });
     const result = {
       routeCode,

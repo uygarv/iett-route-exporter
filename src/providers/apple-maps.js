@@ -4,10 +4,18 @@ function formatCoordinate(point) {
   return `${point.lat},${point.lng}`;
 }
 
-export function buildAppleMapsUrl({ origin, destination, waypoints }) {
+export function buildAppleMapsUrl({
+  origin,
+  destination,
+  waypoints,
+  useCurrentLocation = false
+}) {
   const url = new URL(DIRECTIONS_URL);
 
-  url.searchParams.set("source", formatCoordinate(origin));
+  if (!useCurrentLocation) {
+    url.searchParams.set("source", formatCoordinate(origin));
+  }
+
   url.searchParams.set("destination", formatCoordinate(destination));
   url.searchParams.set("mode", "driving");
 

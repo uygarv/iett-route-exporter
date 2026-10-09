@@ -195,6 +195,7 @@ test("builds an encoded URL and falls back from invalid stop coordinates", async
 
   assert.deepEqual(result.origin, { lat: 41, lng: 29 });
   assert.equal(url.searchParams.get("api"), "1");
+  assert.equal(url.searchParams.get("origin"), "41,29");
   assert.equal(url.searchParams.get("travelmode"), "driving");
   assert.ok(result.waypoints.length <= 5);
   assert.ok(result.debug.candidates.length > 0);
@@ -599,14 +600,30 @@ test("trims at a current location and rejects locations far from the route", asy
   const result = await service.buildIettGoogleMapsRoute("256_G_D0", {
     currentLocation
   });
+  const googleUrl = new URL(result.url);
 
   assert.deepEqual(result.origin, currentLocation);
   assert.equal(result.originSource, "current-location");
+  assert.equal(googleUrl.searchParams.get("origin"), null);
   assert.ok(result.startDistanceAlongRoute > 500);
   assert.ok(result.remainingRouteLengthMeters < result.routeLengthMeters);
   assert.ok(result.waypoints.every(point => {
     return point.distanceAlongRoute > result.startDistanceAlongRoute;
   }));
+
+  const appleResult = await service.buildIettAppleMapsRoute("256_G_D0", {
+    currentLocation
+  });
+  const appleUrl = new URL(appleResult.url);
+
+  assert.equal(appleUrl.searchParams.get("source"), null);
+
+  const yandexResult = await service.buildIettYandexMapsRoute("256_G_D0", {
+    currentLocation
+  });
+  const yandexUrl = new URL(yandexResult.url);
+
+  assert.ok(yandexUrl.searchParams.get("rtext").startsWith("~"));
 
   await assert.rejects(
     service.buildIettGoogleMapsRoute("256_G_D0", {

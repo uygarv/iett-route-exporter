@@ -4,12 +4,22 @@ function formatCoordinate(point) {
   return `${point.lat},${point.lng}`;
 }
 
-export function buildYandexMapsUrl({ origin, destination, waypoints }) {
+export function buildYandexMapsUrl({
+  origin,
+  destination,
+  waypoints,
+  useCurrentLocation = false
+}) {
   const url = new URL(DIRECTIONS_URL);
-  const routePoints = [origin, ...waypoints, destination];
+  const routePoints = [
+    ...(useCurrentLocation ? [] : [origin]),
+    ...waypoints,
+    destination
+  ];
+  const routeText = routePoints.map(formatCoordinate).join("~");
 
   url.searchParams.set("mode", "routes");
-  url.searchParams.set("rtext", routePoints.map(formatCoordinate).join("~"));
+  url.searchParams.set("rtext", useCurrentLocation ? `~${routeText}` : routeText);
   url.searchParams.set("rtt", "auto");
 
   return url.toString();

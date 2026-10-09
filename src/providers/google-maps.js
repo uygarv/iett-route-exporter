@@ -4,11 +4,20 @@ function formatCoordinate(point) {
   return `${point.lat},${point.lng}`;
 }
 
-export function buildGoogleMapsUrl({ origin, destination, waypoints }) {
+export function buildGoogleMapsUrl({
+  origin,
+  destination,
+  waypoints,
+  useCurrentLocation = false
+}) {
   const url = new URL(DIRECTIONS_URL);
 
   url.searchParams.set("api", "1");
-  url.searchParams.set("origin", formatCoordinate(origin));
+
+  if (!useCurrentLocation) {
+    url.searchParams.set("origin", formatCoordinate(origin));
+  }
+
   url.searchParams.set("destination", formatCoordinate(destination));
   url.searchParams.set("travelmode", "driving");
 
