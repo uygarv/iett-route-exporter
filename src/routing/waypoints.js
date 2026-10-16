@@ -23,6 +23,10 @@ const MIN_SWAP_IMPROVEMENT = 0.005;
 const MAX_ACCEPTABLE_DEVIATION_METERS = 75;
 const P95_ACCEPTABLE_DEVIATION_METERS = 30;
 const RESAMPLE_SPACING_METERS = 30;
+const EARTH_RADIUS_METERS = 6_371_008.8;
+const LANE_SAMPLE_RADIUS_METERS = 1_200;
+const MAX_STATION_OFFSET_METERS = 30;
+const MAX_PROVIDER_LANE_OFFSET_METERS = 10;
 
 function bearing(first, second, projector) {
   const start = projector.project(first);
@@ -55,6 +59,117 @@ function turnClass(angle) {
   }
 
   return "none";
+}
+
+function routeDirectionAt(geometry, distance) {
+  const before = pointAlongRoute(geometry, distance - 20);
+  const after = pointAlongRoute(geometry, distance + 20);
+  const projectedBefore = geometry.projector.project(before);
+  const projectedAfter = geometry.projector.project(after);
+  const east = projectedAfter.x - projectedBefore.x;
+  const north = projectedAfter.y - projectedBefore.y;
+  const length = Math.hypot(east, north);
+
+  if (length < 1) {
+    return null;
+  }
+
+  return {
+    east: east / length,
+    north: north / length
+  };
+}
+
+function signedRightOffset(geometry, distance, coordinate) {
+  const direction = routeDirectionAt(geometry, distance);
+
+  if (!direction) {
+    return null;
+  }
+
+  const routePoint = pointAlongRoute(geometry, distance);
+  const projectedRoute = geometry.projector.project(routePoint);
+  const projectedCoordinate = geometry.projector.project(coordinate);
+  const deltaEast = projectedCoordinate.x - projectedRoute.x;
+  const deltaNorth = projectedCoordinate.y - projectedRoute.y;
+  const rightEast = direction.north;
+  const rightNorth = -direction.east;
+
+  return deltaEast * rightEast + deltaNorth * rightNorth;
+}
+
+function buildLaneSamples(geometry, stationConstraints) {
+  return stationConstraints.flatMap(station => {
+    if (
+      !station.rawCoordinate
+      || station.distanceToRoute > MAX_STATION_OFFSET_METERS
+    ) {
+      return [];
+    }
+
+    const rightOffset = signedRightOffset(
+      geometry,
+      station.distanceAlongRoute,
+      station.rawCoordinate
+    );
+
+    if (rightOffset === null || Math.abs(rightOffset) > MAX_STATION_OFFSET_METERS) {
+      return [];
+    }
+
+    return [{
+      distanceAlongRoute: station.distanceAlongRoute,
+      rightOffset
+    }];
+  });
+}
+
+function localLaneOffset(candidate, laneSamples) {
+  if (candidate.turnAngle >= MEDIUM_TURN_DEGREES) {
+    return 0;
+  }
+
+  const localSamples = laneSamples.filter(sample => {
+    return Math.abs(sample.distanceAlongRoute - candidate.distanceAlongRoute)
+      <= LANE_SAMPLE_RADIUS_METERS;
+  });
+  const rightSideSamples = localSamples
+    .filter(sample => sample.rightOffset >= 1)
+    .sort((first, second) => first.rightOffset - second.rightOffset);
+
+  if (
+    rightSideSamples.length < 2
+    || rightSideSamples.length / localSamples.length < 0.7
+  ) {
+    return 0;
+  }
+
+  const median = rightSideSamples[Math.floor(rightSideSamples.length / 2)].rightOffset;
+
+  return clamp(median, 0, MAX_PROVIDER_LANE_OFFSET_METERS);
+}
+
+function moveRightOfRoute(geometry, candidate, offsetMeters) {
+  if (offsetMeters < 1) {
+    return null;
+  }
+
+  const direction = routeDirectionAt(geometry, candidate.distanceAlongRoute);
+
+  if (!direction) {
+    return null;
+  }
+
+  const rightEast = direction.north * offsetMeters;
+  const rightNorth = -direction.east * offsetMeters;
+  const latitudeRadians = candidate.lat * Math.PI / 180;
+
+  return {
+    lat: candidate.lat + rightNorth / EARTH_RADIUS_METERS * 180 / Math.PI,
+    lng: candidate.lng
+      + rightEast / (EARTH_RADIUS_METERS * Math.cos(latitudeRadians))
+        * 180 / Math.PI
+  };
 }
 
 function isStrongTurnCandidate(candidate) {
@@ -201,6 +316,7 @@ function buildCandidates(geometry, samples, startDistance, endDistance, stationC
       stationIndex: station.stationIndex,
       distanceToRoute: station.distanceToRoute,
       projectedToRoute,
+      rawCoordinate: station.rawCoordinate,
       selectable: angle >= MEDIUM_TURN_DEGREES,
       reasons: ["station"]
     });
@@ -705,10 +821,7 @@ function fillRemainingSlots(context) {
         || second.evaluation.nearestDistance - first.evaluation.nearestDistance;
     })[0];
 
-    if (
-      !geometryNeedsHelp
-      && !isSignificant(choice.candidate, choice.evaluation)
-    ) {
+    if (!isSignificant(choice.candidate, choice.evaluation)) {
       stoppedForSignificance = true;
       break;
     }
@@ -988,9 +1101,9 @@ export function selectWaypoints(geometry, {
   );
   const remainingLength = endDistance - startDistance;
   const minSpacing = clamp(
-    remainingLength / Math.max(maxWaypoints * 2, 1),
-    90,
-    350
+    remainingLength / 18,
+    400,
+    1_200
   );
   const coverageFloor = minimumCoverageCount(remainingLength, maxWaypoints);
   const selected = [];
@@ -1069,16 +1182,31 @@ export function selectWaypoints(geometry, {
     controlsFor(selected, startDistance, endDistance),
     samples
   );
+  const laneSamples = buildLaneSamples(geometry, stationConstraints);
+
+  for (const candidate of selected) {
+    const laneOffsetMeters = localLaneOffset(candidate, laneSamples);
+    const providerCoordinate = moveRightOfRoute(
+      geometry,
+      candidate,
+      laneOffsetMeters
+    );
+
+    candidate.laneOffsetMeters = providerCoordinate ? laneOffsetMeters : 0;
+    candidate.providerCoordinate = providerCoordinate;
+  }
 
   return {
     waypoints: selected.map(candidate => ({
-      lat: candidate.lat,
-      lng: candidate.lng,
+      lat: candidate.providerCoordinate?.lat ?? candidate.lat,
+      lng: candidate.providerCoordinate?.lng ?? candidate.lng,
       distanceAlongRoute: candidate.distanceAlongRoute,
       score: candidate.selectionScore,
       turnAngle: candidate.turnAngle,
       reason: reasonFor(candidate),
       roles: [...candidate.reasons],
+      providerAdjusted: Boolean(candidate.providerCoordinate),
+      laneOffsetMeters: candidate.laneOffsetMeters,
       ...(candidate.stationName ? {
         stationName: candidate.stationName,
         stationIndex: candidate.stationIndex,
@@ -1121,7 +1249,9 @@ export function selectWaypoints(geometry, {
       stationName: candidate.stationName ?? null,
       stationIndex: candidate.stationIndex ?? null,
       distanceToRoute: candidate.distanceToRoute ?? null,
-      projectedToRoute: candidate.projectedToRoute ?? false
+      projectedToRoute: candidate.projectedToRoute ?? false,
+      providerCoordinate: candidate.providerCoordinate ?? null,
+      laneOffsetMeters: candidate.laneOffsetMeters ?? 0
     }))
   };
 }

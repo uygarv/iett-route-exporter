@@ -49,6 +49,37 @@ test("does not use a weak bend as a standalone turn waypoint", () => {
   assert.equal(weakTurn.rejectionReason, "weak-turn");
 });
 
+test("uses nearby stop offsets to keep straight-road waypoints on the travel side", () => {
+  const geometry = buildRouteGeometry("LINESTRING (29 41, 29.04 41)");
+  const stationConstraints = [600, 1_600, 2_600].map((distance, index) => {
+    const routePoint = pointAlongRoute(geometry, distance);
+
+    return {
+      ...routePoint,
+      rawCoordinate: {
+        lat: routePoint.lat - 0.00005,
+        lng: routePoint.lng
+      },
+      stationName: `STOP ${index}`,
+      stationIndex: index,
+      distanceToRoute: 5.5,
+      projectedToRoute: true
+    };
+  });
+  const selection = selectWaypoints(geometry, {
+    maxWaypoints: 3,
+    stationConstraints
+  });
+  const adjusted = selection.waypoints.filter(waypoint => waypoint.providerAdjusted);
+
+  assert.ok(adjusted.length > 0);
+  assert.ok(adjusted.every(waypoint => waypoint.lat < 41));
+  assert.ok(adjusted.every(waypoint => waypoint.laneOffsetMeters >= 5));
+  assert.ok(selection.candidates.some(candidate => {
+    return candidate.selected && candidate.providerCoordinate;
+  }));
+});
+
 test("rejects malformed and disconnected IETT geometry", () => {
   assert.throws(
     () => buildRouteGeometry("POINT (29 41)"),

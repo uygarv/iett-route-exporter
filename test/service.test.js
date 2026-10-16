@@ -438,7 +438,7 @@ test("preserves IETT geometry when a Yandex route has more stops than its budget
   assert.ok(result.waypoints.length <= 18);
   assert.ok(result.stationWaypointCount < result.waypoints.length);
   assert.ok(result.additionalTurnWaypointCount > 0);
-  assert.ok(result.waypoints.some(waypoint => waypoint.reason === "coverage"));
+  assert.ok(result.waypoints.some(waypoint => waypoint.roles.includes("coverage")));
   assert.ok(result.debug.controlPath.maxDeviationMeters < 110);
 });
 

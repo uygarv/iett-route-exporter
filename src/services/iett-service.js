@@ -107,6 +107,7 @@ function stationConstraintsFromStops(stops, geometry) {
 
       return {
         ...routeCoordinate,
+        rawCoordinate: coordinate,
         stationName: stopName(stop),
         stationIndex: stop.stationIndex,
         distanceAlongRoute: match.distanceAlongRoute,
@@ -119,6 +120,7 @@ function stationConstraintsFromStops(stops, geometry) {
 
   return matchStopsToRoute(validStops, geometry).map(stop => ({
     ...stop.providerCoordinate,
+    rawCoordinate: stop.coordinate,
     stationName: stop.name,
     stationIndex: stop.stationIndex,
     distanceAlongRoute: stop.distanceAlongRoute,
