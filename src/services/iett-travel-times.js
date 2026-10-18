@@ -3,6 +3,9 @@ import { parseCoordinate } from "../shared/validation.js";
 import {
   buildRouteGeometry,
   findClosestRoutePosition,
+  findRoutePositionCandidates,
+  haversineDistance,
+  resampleRoute,
   pointAlongRoute
 } from "../routing/geometry.js";
 import { matchStopsToRoute, sliceRouteGeometry } from "../routing/timing.js";
@@ -12,9 +15,22 @@ import {
 } from "../routing/stations.js";
 
 const MAX_NODES_PER_REQUEST = 152;
+const MAX_RECONSTRUCTION_LEG_METERS = 1_000;
 const DEFAULT_DWELL_TIME_SECONDS = 20;
 const MAX_DWELL_TIME_SECONDS = 600;
 const MAX_CURRENT_LOCATION_DISTANCE_METERS = 500;
+const MAX_RECONSTRUCTION_ENDPOINT_OFFSET_METERS = 40;
+const MAX_RECONSTRUCTION_P95_DEVIATION_METERS = 35;
+const MAX_RECONSTRUCTION_DEVIATION_METERS = 80;
+const RECONSTRUCTION_LANE_OFFSETS_METERS = [0, 4, -4, 8, -8, 12, -12, 16, -16];
+const MIN_REPAIR_SPLIT_METERS = 25;
+const MAX_UNMAPPED_MANEUVER_METERS = 75;
+const MAX_UNMAPPED_ROUTE_SECTION_METERS = 1_000;
+const MIN_UNMAPPED_MANEUVER_TURN_DEGREES = 60;
+const MIN_LONG_UNMAPPED_SECTION_TURN_DEGREES = 135;
+const UNMAPPED_MANEUVER_SPEED_METERS_PER_SECOND = 2.5;
+const MIN_UNMAPPED_MANEUVER_DURATION_SECONDS = 8;
+const EARTH_RADIUS_METERS = 6_371_008.8;
 
 function readStationOption(options, fieldName) {
   const errorField = fieldName === "startStation"
@@ -307,6 +323,52 @@ function selectRouteNodes(matches, geometry, options) {
   return nodes;
 }
 
+function buildRoutingNodes(nodes, geometry, dwellTimeSeconds) {
+  const routingNodes = [{
+    ...nodes[0],
+    publicSegmentIndex: null,
+    pauseDurationInSeconds: 0
+  }];
+  let anchorCount = 0;
+
+  for (let segmentIndex = 0; segmentIndex < nodes.length - 1; segmentIndex += 1) {
+    const from = nodes[segmentIndex];
+    const to = nodes[segmentIndex + 1];
+    const segmentLength = to.distanceAlongRoute - from.distanceAlongRoute;
+    const partCount = Math.max(
+      1,
+      Math.ceil(segmentLength / MAX_RECONSTRUCTION_LEG_METERS)
+    );
+
+    for (let partIndex = 1; partIndex < partCount; partIndex += 1) {
+      const distanceAlongRoute = from.distanceAlongRoute
+        + segmentLength * partIndex / partCount;
+      const point = pointAlongRoute(geometry, distanceAlongRoute);
+
+      routingNodes.push({
+        type: "route-anchor",
+        lat: point.lat,
+        lng: point.lng,
+        providerCoordinate: { lat: point.lat, lng: point.lng },
+        distanceAlongRoute: point.distanceAlongRoute,
+        publicSegmentIndex: segmentIndex,
+        pauseDurationInSeconds: 0
+      });
+      anchorCount += 1;
+    }
+
+    routingNodes.push({
+      ...to,
+      publicSegmentIndex: segmentIndex,
+      pauseDurationInSeconds: segmentIndex < nodes.length - 2 && to.type === "station"
+        ? dwellTimeSeconds
+        : 0
+    });
+  }
+
+  return { routingNodes, anchorCount };
+}
+
 function chunkRouteNodes(nodes) {
   const chunks = [];
   let startIndex = 0;
@@ -333,31 +395,110 @@ function pointGeoJson(coordinate) {
   };
 }
 
-function createTomTomPayload(chunk, geometry, departureTime, dwellTimeSeconds) {
+function offsetRouteCoordinate(geometry, distanceAlongRoute, offsetMeters) {
+  const point = pointAlongRoute(geometry, distanceAlongRoute);
+
+  if (offsetMeters === 0) {
+    return { lat: point.lat, lng: point.lng };
+  }
+
+  const before = pointAlongRoute(geometry, distanceAlongRoute - 15);
+  const after = pointAlongRoute(geometry, distanceAlongRoute + 15);
+  const projectedBefore = geometry.projector.project(before);
+  const projectedAfter = geometry.projector.project(after);
+  const east = projectedAfter.x - projectedBefore.x;
+  const north = projectedAfter.y - projectedBefore.y;
+  const length = Math.hypot(east, north);
+
+  if (length < 1) {
+    return { lat: point.lat, lng: point.lng };
+  }
+
+  const rightEast = north / length * offsetMeters;
+  const rightNorth = -east / length * offsetMeters;
+  const latitudeRadians = point.lat * Math.PI / 180;
+
+  return {
+    lat: point.lat + rightNorth / EARTH_RADIUS_METERS * 180 / Math.PI,
+    lng: point.lng
+      + rightEast / (EARTH_RADIUS_METERS * Math.cos(latitudeRadians))
+        * 180 / Math.PI
+  };
+}
+
+function shiftPathRight(points, offsetMeters) {
+  if (offsetMeters === 0) {
+    return points.map(point => ({ ...point }));
+  }
+
+  const centerLatitude = points.reduce((sum, point) => sum + point.lat, 0) / points.length;
+  const cosine = Math.cos(centerLatitude * Math.PI / 180);
+
+  return points.map((point, index) => {
+    const before = points[Math.max(0, index - 1)];
+    const after = points[Math.min(points.length - 1, index + 1)];
+    const east = (after.lng - before.lng) * Math.PI / 180
+      * EARTH_RADIUS_METERS * cosine;
+    const north = (after.lat - before.lat) * Math.PI / 180
+      * EARTH_RADIUS_METERS;
+    const length = Math.hypot(east, north);
+
+    if (length < 1) {
+      return { ...point };
+    }
+
+    const rightEast = north / length * offsetMeters;
+    const rightNorth = -east / length * offsetMeters;
+
+    return {
+      lat: point.lat + rightNorth / EARTH_RADIUS_METERS * 180 / Math.PI,
+      lng: point.lng
+        + rightEast / (EARTH_RADIUS_METERS * cosine) * 180 / Math.PI
+    };
+  });
+}
+
+function coordinateForRoutingNode(node, geometry, laneOffsetMeters) {
+  if (laneOffsetMeters === 0) {
+    return node.providerCoordinate;
+  }
+
+  return offsetRouteCoordinate(geometry, node.distanceAlongRoute, laneOffsetMeters);
+}
+
+function createTomTomPayload(chunk, geometry, departureTime, laneOffsetMeters = 0) {
   const first = chunk.nodes[0];
   const last = chunk.nodes.at(-1);
   const intermediate = chunk.nodes.slice(1, -1);
   const routePlanningLocations = {
-    origin: pointGeoJson(first.providerCoordinate),
-    destination: pointGeoJson(last.providerCoordinate)
+    origin: pointGeoJson(coordinateForRoutingNode(first, geometry, laneOffsetMeters)),
+    destination: pointGeoJson(coordinateForRoutingNode(last, geometry, laneOffsetMeters))
   };
 
   if (intermediate.length) {
     routePlanningLocations.waypoints = {
       type: "MultiPoint",
       coordinates: intermediate.map(node => {
-        return [node.providerCoordinate.lng, node.providerCoordinate.lat];
+        const coordinate = coordinateForRoutingNode(node, geometry, laneOffsetMeters);
+
+        return [coordinate.lng, coordinate.lat];
       })
     };
   }
 
   const legs = chunk.nodes.slice(1).map((node, index, arrivals) => {
     const previousNode = chunk.nodes[index];
-    const legPath = sliceRouteGeometry(
+    const originalLegPath = sliceRouteGeometry(
       geometry,
       previousNode.distanceAlongRoute,
       node.distanceAlongRoute
     );
+    const legPath = shiftPathRight(originalLegPath, laneOffsetMeters);
+    const start = coordinateForRoutingNode(previousNode, geometry, laneOffsetMeters);
+    const end = coordinateForRoutingNode(node, geometry, laneOffsetMeters);
+
+    legPath[0] = start;
+    legPath[legPath.length - 1] = end;
     const finalArrivalInChunk = index === arrivals.length - 1;
     const leg = {
       path: {
@@ -370,9 +511,11 @@ function createTomTomPayload(chunk, geometry, departureTime, dwellTimeSeconds) {
       return leg;
     }
 
-    leg.routeStop = {
-      pauseDurationInSeconds: dwellTimeSeconds
-    };
+    if (node.pauseDurationInSeconds > 0) {
+      leg.routeStop = {
+        pauseDurationInSeconds: node.pauseDurationInSeconds
+      };
+    }
 
     return leg;
   });
@@ -391,8 +534,130 @@ function finiteNonNegative(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-function readTomTomLegs(data, expectedCount) {
+function pathCoordinates(path, legIndex) {
+  if (
+    path?.type !== "LineString"
+    || !Array.isArray(path.coordinates)
+    || path.coordinates.length < 2
+  ) {
+    throw new AppError(
+      502,
+      "TOMTOM_MALFORMED_RESPONSE",
+      "TomTom returned a route leg without usable geometry.",
+      { legIndex }
+    );
+  }
+
+  return path.coordinates.map((coordinate, pointIndex) => {
+    const lng = coordinate?.[0];
+    const lat = coordinate?.[1];
+
+    if (
+      !Array.isArray(coordinate)
+      || coordinate.length !== 2
+      || !Number.isFinite(lat)
+      || !Number.isFinite(lng)
+    ) {
+      throw new AppError(
+        502,
+        "TOMTOM_MALFORMED_RESPONSE",
+        "TomTom returned an invalid route-leg coordinate.",
+        { legIndex, pointIndex }
+      );
+    }
+
+    return { lat, lng };
+  });
+}
+
+function geometryFromPoints(points, legIndex) {
+  const line = `LINESTRING (${points.map(point => {
+    return `${point.lng} ${point.lat}`;
+  }).join(", ")})`;
+
+  try {
+    return buildRouteGeometry(line);
+  } catch {
+    throw new AppError(
+      502,
+      "TOMTOM_MALFORMED_RESPONSE",
+      "TomTom returned invalid route-leg geometry.",
+      { legIndex }
+    );
+  }
+}
+
+function percentile(values, fraction) {
+  const sorted = [...values].sort((first, second) => first - second);
+  const index = Math.max(0, Math.ceil(sorted.length * fraction) - 1);
+
+  return sorted[index] ?? 0;
+}
+
+function distanceDistribution(source, target) {
+  const spacing = Math.min(15, Math.max(3, source.totalLength / 10));
+  const distances = resampleRoute(source, spacing).map(point => {
+    return findRoutePositionCandidates(target, point).reduce((best, match) => {
+      return Math.min(best, match.distanceToRoute);
+    }, Infinity);
+  });
+
+  return {
+    percentile95: percentile(distances, 0.95),
+    maximum: Math.max(...distances)
+  };
+}
+
+function roundedMetrics(metrics) {
+  return Object.fromEntries(Object.entries(metrics).map(([key, value]) => {
+    return [key, Math.round(value * 10) / 10];
+  }));
+}
+
+function validateReconstructedLeg(requestPath, responsePath, reportedLength, legIndex) {
+  const requestedPoints = pathCoordinates(requestPath, legIndex);
+  const returnedPoints = pathCoordinates(responsePath, legIndex);
+  const requestedGeometry = geometryFromPoints(requestedPoints, legIndex);
+  const returnedGeometry = geometryFromPoints(returnedPoints, legIndex);
+  const requestedToReturned = distanceDistribution(requestedGeometry, returnedGeometry);
+  const returnedToRequested = distanceDistribution(returnedGeometry, requestedGeometry);
+  const startOffset = haversineDistance(requestedPoints[0], returnedPoints[0]);
+  const endOffset = haversineDistance(requestedPoints.at(-1), returnedPoints.at(-1));
+  const referenceLength = requestedGeometry.totalLength;
+  const returnedPathLength = returnedGeometry.totalLength;
+  const reportedLengthDelta = Math.abs(reportedLength - referenceLength);
+  const returnedPathLengthDelta = Math.abs(reportedLength - returnedPathLength);
+  const allowedReportedLengthDelta = Math.max(60, referenceLength * 0.35);
+  const allowedReturnedPathLengthDelta = Math.max(75, returnedPathLength * 0.25);
+  const metrics = {
+    referenceLengthMeters: referenceLength,
+    returnedLengthMeters: reportedLength,
+    returnedPathLengthMeters: returnedPathLength,
+    startOffsetMeters: startOffset,
+    endOffsetMeters: endOffset,
+    referenceToReturnedP95Meters: requestedToReturned.percentile95,
+    referenceToReturnedMaxMeters: requestedToReturned.maximum,
+    returnedToReferenceP95Meters: returnedToRequested.percentile95,
+    returnedToReferenceMaxMeters: returnedToRequested.maximum
+  };
+  const deviates = startOffset > MAX_RECONSTRUCTION_ENDPOINT_OFFSET_METERS
+    || endOffset > MAX_RECONSTRUCTION_ENDPOINT_OFFSET_METERS
+    || requestedToReturned.percentile95 > MAX_RECONSTRUCTION_P95_DEVIATION_METERS
+    || returnedToRequested.percentile95 > MAX_RECONSTRUCTION_P95_DEVIATION_METERS
+    || requestedToReturned.maximum > MAX_RECONSTRUCTION_DEVIATION_METERS
+    || returnedToRequested.maximum > MAX_RECONSTRUCTION_DEVIATION_METERS
+    || reportedLengthDelta > allowedReportedLengthDelta
+    || returnedPathLengthDelta > allowedReturnedPathLengthDelta;
+
+  return {
+    ...roundedMetrics(metrics),
+    valid: !deviates
+  };
+}
+
+function readTomTomLegs(data, requestLegs) {
   const route = data?.routes?.[0];
+  const expectedCount = requestLegs.length;
 
   if (!route || !Array.isArray(route.legs) || route.legs.length !== expectedCount) {
     throw new AppError(
@@ -435,6 +700,13 @@ function readTomTomLegs(data, expectedCount) {
       );
     }
 
+    const reconstruction = validateReconstructedLeg(
+      requestLegs[index].path,
+      leg?.path,
+      lengthInMeters,
+      index
+    );
+
     return {
       distanceMeters: lengthInMeters,
       drivingDurationSeconds: travelDurationInSeconds,
@@ -442,13 +714,124 @@ function readTomTomLegs(data, expectedCount) {
       freeFlowDurationSeconds: travelDurationInSeconds - trafficDelayDurationInSeconds,
       departureTime: summary.departureDateTime,
       arrivalTime: summary.arrivalDateTime,
-      arrivalTimestamp: arrival.getTime()
+      arrivalTimestamp: arrival.getTime(),
+      reconstruction
     };
   });
 }
 
 function addSeconds(timestamp, seconds) {
   return new Date(timestamp + seconds * 1_000).toISOString();
+}
+
+function bearingDegrees(from, to) {
+  const fromLatitude = from.lat * Math.PI / 180;
+  const toLatitude = to.lat * Math.PI / 180;
+  const longitudeDelta = (to.lng - from.lng) * Math.PI / 180;
+  const y = Math.sin(longitudeDelta) * Math.cos(toLatitude);
+  const x = Math.cos(fromLatitude) * Math.sin(toLatitude)
+    - Math.sin(fromLatitude) * Math.cos(toLatitude) * Math.cos(longitudeDelta);
+
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+function bearingDifference(first, second) {
+  return Math.abs((second - first + 540) % 360 - 180);
+}
+
+function unmappedManeuver(nodes, geometry, failedLeg) {
+  const startDistance = nodes[0].distanceAlongRoute;
+  const endDistance = nodes[1].distanceAlongRoute;
+  const length = endDistance - startDistance;
+
+  if (length <= 0 || length > MAX_UNMAPPED_ROUTE_SECTION_METERS) {
+    return null;
+  }
+
+  const start = pointAlongRoute(geometry, startDistance);
+  const before = pointAlongRoute(geometry, startDistance - 30);
+  const outgoingStart = pointAlongRoute(
+    geometry,
+    startDistance + Math.min(5, length * 0.2)
+  );
+  const outgoingEnd = pointAlongRoute(
+    geometry,
+    startDistance + Math.min(35, length)
+  );
+  const incomingLength = haversineDistance(before, start);
+  const outgoingLength = haversineDistance(outgoingStart, outgoingEnd);
+  const turnAngle = incomingLength >= 5 && outgoingLength >= 5
+    ? bearingDifference(
+        bearingDegrees(before, start),
+        bearingDegrees(outgoingStart, outgoingEnd)
+      )
+    : 0;
+  const requiredTurnAngle = length <= MAX_UNMAPPED_MANEUVER_METERS
+    ? MIN_UNMAPPED_MANEUVER_TURN_DEGREES
+    : MIN_LONG_UNMAPPED_SECTION_TURN_DEGREES;
+  const meaningfulTurn = turnAngle >= requiredTurnAngle;
+  const returnedLength = failedLeg?.reconstruction?.returnedLengthMeters;
+  const grossMismatch = failedLeg === null
+    || Math.abs(returnedLength - length) > Math.max(100, length * 0.25);
+
+  if (!meaningfulTurn || !grossMismatch) {
+    return null;
+  }
+
+  return {
+    length,
+    turnAngle,
+    startDistanceAlongRoute: startDistance,
+    endDistanceAlongRoute: endDistance
+  };
+}
+
+function estimatedManeuverLeg(maneuver, departureTime, failedLeg) {
+  const parsedDeparture = Date.parse(departureTime);
+  const departureTimestamp = Number.isNaN(parsedDeparture)
+    ? Date.now()
+    : parsedDeparture;
+  const failedSpeed = failedLeg?.distanceMeters > 0
+    && failedLeg?.drivingDurationSeconds > 0
+    ? failedLeg.distanceMeters / failedLeg.drivingDurationSeconds
+    : UNMAPPED_MANEUVER_SPEED_METERS_PER_SECOND;
+  const estimatedSpeed = Math.min(13.9, Math.max(1, failedSpeed));
+  const minimumDuration = maneuver.length <= MAX_UNMAPPED_MANEUVER_METERS
+    ? MIN_UNMAPPED_MANEUVER_DURATION_SECONDS
+    : 1;
+  const duration = Math.ceil(Math.max(
+    minimumDuration,
+    maneuver.length / estimatedSpeed
+  ));
+  const trafficRatio = failedLeg?.drivingDurationSeconds > 0
+    ? failedLeg.trafficDelaySeconds / failedLeg.drivingDurationSeconds
+    : 0;
+  const trafficDelay = Math.min(duration, Math.round(duration * trafficRatio));
+  const arrivalTimestamp = departureTimestamp + duration * 1_000;
+
+  return {
+    distanceMeters: maneuver.length,
+    drivingDurationSeconds: duration,
+    trafficDelaySeconds: trafficDelay,
+    freeFlowDurationSeconds: duration - trafficDelay,
+    departureTime: new Date(departureTimestamp).toISOString(),
+    arrivalTime: new Date(arrivalTimestamp).toISOString(),
+    arrivalTimestamp,
+    estimatedManeuverDurationSeconds: duration,
+    reconstruction: {
+      valid: true,
+      estimated: true,
+      referenceLengthMeters: maneuver.length,
+      returnedLengthMeters: maneuver.length,
+      returnedPathLengthMeters: maneuver.length,
+      startOffsetMeters: 0,
+      endOffsetMeters: 0,
+      referenceToReturnedP95Meters: 0,
+      referenceToReturnedMaxMeters: 0,
+      returnedToReferenceP95Meters: 0,
+      returnedToReferenceMaxMeters: 0
+    }
+  };
 }
 
 function totalFromSegments(segments) {
@@ -458,19 +841,99 @@ function totalFromSegments(segments) {
     result.dwellDurationSeconds += segment.dwellAfterArrivalSeconds;
     result.freeFlowDurationSeconds += segment.freeFlowDurationSeconds;
     result.trafficDelaySeconds += segment.trafficDelaySeconds;
+    result.estimatedManeuverDurationSeconds += segment.estimatedManeuverDurationSeconds ?? 0;
     return result;
   }, {
     distanceMeters: 0,
     drivingDurationSeconds: 0,
     dwellDurationSeconds: 0,
     freeFlowDurationSeconds: 0,
-    trafficDelaySeconds: 0
+    trafficDelaySeconds: 0,
+    estimatedManeuverDurationSeconds: 0
   });
 
   total.estimatedDurationSeconds = total.drivingDurationSeconds + total.dwellDurationSeconds;
   total.departureTime = segments[0].departureTime;
   total.arrivalTime = segments.at(-1).arrivalTime;
+
+  if (total.estimatedManeuverDurationSeconds === 0) {
+    delete total.estimatedManeuverDurationSeconds;
+  }
+
   return total;
+}
+
+function createPublicSegments(nodes, dwellTimeSeconds) {
+  return nodes.slice(0, -1).map((node, index) => ({
+    index,
+    from: publicNode(node),
+    to: publicNode(nodes[index + 1]),
+    distanceMeters: 0,
+    drivingDurationSeconds: 0,
+    freeFlowDurationSeconds: 0,
+    trafficDelaySeconds: 0,
+    estimatedManeuverDurationSeconds: 0,
+    dwellAfterArrivalSeconds: index === nodes.length - 2 ? 0 : dwellTimeSeconds,
+    departureTime: null,
+    arrivalTime: null,
+    reconstruction: {
+      providerLegCount: 0,
+      referenceLengthMeters: 0,
+      returnedLengthMeters: 0,
+      maximumDeviationMeters: 0,
+      maximumP95DeviationMeters: 0,
+      estimatedManeuverCount: 0
+    }
+  }));
+}
+
+function addProviderLeg(segment, leg) {
+  segment.distanceMeters += leg.distanceMeters;
+  segment.drivingDurationSeconds += leg.drivingDurationSeconds;
+  segment.freeFlowDurationSeconds += leg.freeFlowDurationSeconds;
+  segment.trafficDelaySeconds += leg.trafficDelaySeconds;
+  segment.estimatedManeuverDurationSeconds += leg.estimatedManeuverDurationSeconds ?? 0;
+  segment.departureTime ??= leg.departureTime;
+  segment.arrivalTime = leg.arrivalTime;
+  segment.reconstruction.providerLegCount += leg.reconstruction.estimated ? 0 : 1;
+  segment.reconstruction.estimatedManeuverCount += leg.reconstruction.estimated ? 1 : 0;
+  segment.reconstruction.referenceLengthMeters += leg.reconstruction.referenceLengthMeters;
+  segment.reconstruction.returnedLengthMeters += leg.reconstruction.returnedLengthMeters;
+  segment.reconstruction.maximumDeviationMeters = Math.max(
+    segment.reconstruction.maximumDeviationMeters,
+    leg.reconstruction.referenceToReturnedMaxMeters,
+    leg.reconstruction.returnedToReferenceMaxMeters
+  );
+  segment.reconstruction.maximumP95DeviationMeters = Math.max(
+    segment.reconstruction.maximumP95DeviationMeters,
+    leg.reconstruction.referenceToReturnedP95Meters,
+    leg.reconstruction.returnedToReferenceP95Meters
+  );
+}
+
+function finalizePublicSegments(segments) {
+  return segments.map(segment => {
+    if (!segment.departureTime || !segment.arrivalTime) {
+      throw new AppError(
+        502,
+        "TOMTOM_MALFORMED_RESPONSE",
+        "TomTom did not return timing data for an IETT stop interval.",
+        { segmentIndex: segment.index }
+      );
+    }
+
+    const result = {
+      ...segment,
+      elapsedUntilNextDepartureSeconds: segment.drivingDurationSeconds
+        + segment.dwellAfterArrivalSeconds
+    };
+
+    if (result.estimatedManeuverDurationSeconds === 0) {
+      delete result.estimatedManeuverDurationSeconds;
+    }
+
+    return result;
+  });
 }
 
 function cacheKey(routeCode, options) {
@@ -497,6 +960,250 @@ export function createIettTravelTimeService({
 }) {
   const cache = new Map();
 
+  async function calculateChunk(chunk, geometry, departureTime) {
+    let attemptCount = 0;
+    const repairs = [];
+    const subdivisions = [];
+    const estimatedManeuvers = [];
+
+    async function callTomTom(payload) {
+      for (let retry = 0; retry <= 2; retry += 1) {
+        attemptCount += 1;
+
+        try {
+          return await tomTomClient.calculateRoute(payload);
+        } catch (error) {
+          const retryAfterSeconds = Number(error?.details?.retryAfter);
+          const canRetry = error?.code === "TOMTOM_RATE_LIMITED"
+            && Number.isFinite(retryAfterSeconds)
+            && retryAfterSeconds > 0
+            && retryAfterSeconds <= 5
+            && retry < 2;
+
+          if (!canRetry) {
+            throw error;
+          }
+
+          await new Promise(resolve => {
+            setTimeout(resolve, retryAfterSeconds * 1_000);
+          });
+        }
+      }
+
+      throw new AppError(429, "TOMTOM_RATE_LIMITED", "TomTom rate limited the request.");
+    }
+
+    async function repairLeg(nodes, legDepartureTime, failedLeg = null) {
+      const legChunk = { nodes, startIndex: 0 };
+      const referencePayload = createTomTomPayload(
+        legChunk,
+        geometry,
+        legDepartureTime
+      );
+      let lastReconstruction;
+      let lastError;
+      const maneuver = unmappedManeuver(nodes, geometry, failedLeg);
+
+      function acceptManeuverEstimate() {
+        const leg = estimatedManeuverLeg(maneuver, legDepartureTime, failedLeg);
+
+        estimatedManeuvers.push({
+          publicSegmentIndex: nodes[1].publicSegmentIndex,
+          ...maneuver,
+          durationSeconds: leg.drivingDurationSeconds
+        });
+
+        return [{
+          ...leg,
+          publicSegmentIndex: nodes[1].publicSegmentIndex
+        }];
+      }
+
+      if (maneuver && maneuver.length <= MAX_UNMAPPED_MANEUVER_METERS) {
+        return acceptManeuverEstimate();
+      }
+
+      for (const laneOffsetMeters of RECONSTRUCTION_LANE_OFFSETS_METERS.slice(1)) {
+        const payload = createTomTomPayload(
+          legChunk,
+          geometry,
+          legDepartureTime,
+          laneOffsetMeters
+        );
+
+        try {
+          const data = await callTomTom(payload);
+          const [leg] = readTomTomLegs(data, referencePayload.legs);
+
+          lastReconstruction = leg.reconstruction;
+
+          if (!leg.reconstruction.valid) {
+            continue;
+          }
+
+          repairs.push({
+            publicSegmentIndex: nodes[1].publicSegmentIndex,
+            startDistanceAlongRoute: nodes[0].distanceAlongRoute,
+            endDistanceAlongRoute: nodes[1].distanceAlongRoute,
+            laneOffsetMeters
+          });
+
+          return [{
+            ...leg,
+            publicSegmentIndex: nodes[1].publicSegmentIndex
+          }];
+        } catch (error) {
+          if (error?.code !== "IETT_ROUTE_RECONSTRUCTION_FAILED") {
+            throw error;
+          }
+
+          lastError = error;
+        }
+      }
+
+      if (maneuver) {
+        return acceptManeuverEstimate();
+      }
+
+      const legLength = nodes[1].distanceAlongRoute - nodes[0].distanceAlongRoute;
+
+      if (legLength > MIN_REPAIR_SPLIT_METERS) {
+        const middleDistance = nodes[0].distanceAlongRoute + legLength / 2;
+        const middlePoint = pointAlongRoute(geometry, middleDistance);
+        const middleNode = {
+          type: "route-anchor",
+          lat: middlePoint.lat,
+          lng: middlePoint.lng,
+          providerCoordinate: { lat: middlePoint.lat, lng: middlePoint.lng },
+          distanceAlongRoute: middlePoint.distanceAlongRoute,
+          publicSegmentIndex: nodes[1].publicSegmentIndex,
+          pauseDurationInSeconds: 0
+        };
+
+        subdivisions.push({
+          publicSegmentIndex: nodes[1].publicSegmentIndex,
+          startDistanceAlongRoute: nodes[0].distanceAlongRoute,
+          endDistanceAlongRoute: nodes[1].distanceAlongRoute,
+          splitDistanceAlongRoute: middlePoint.distanceAlongRoute
+        });
+
+        const firstLegs = await calculateRange({
+          startIndex: 0,
+          nodes: [nodes[0], middleNode]
+        }, legDepartureTime);
+        const secondDepartureTime = addSeconds(
+          firstLegs.at(-1).arrivalTimestamp,
+          middleNode.pauseDurationInSeconds
+        );
+        const secondLegs = await calculateRange({
+          startIndex: 0,
+          nodes: [middleNode, nodes[1]]
+        }, secondDepartureTime);
+
+        return [...firstLegs, ...secondLegs];
+      }
+
+      throw new AppError(
+        502,
+        "IETT_ROUTE_RECONSTRUCTION_FAILED",
+        "TomTom could not reconstruct the IETT geometry accurately.",
+        {
+          attemptedLaneOffsetsMeters: RECONSTRUCTION_LANE_OFFSETS_METERS,
+          publicSegmentIndex: nodes[1].publicSegmentIndex,
+          startDistanceAlongRoute: nodes[0].distanceAlongRoute,
+          endDistanceAlongRoute: nodes[1].distanceAlongRoute,
+          ...(lastReconstruction ? { lastReconstruction } : {}),
+          ...(lastError?.code ? { lastErrorCode: lastError.code } : {})
+        }
+      );
+    }
+
+    async function calculateRange(range, rangeDepartureTime) {
+      const referencePayload = createTomTomPayload(
+        range,
+        geometry,
+        rangeDepartureTime
+      );
+      let legs;
+
+      try {
+        const data = await callTomTom(referencePayload);
+        legs = readTomTomLegs(data, referencePayload.legs).map((leg, index) => ({
+          ...leg,
+          publicSegmentIndex: range.nodes[index + 1].publicSegmentIndex
+        }));
+      } catch (error) {
+        if (error?.code !== "IETT_ROUTE_RECONSTRUCTION_FAILED") {
+          throw error;
+        }
+
+        if (range.nodes.length === 2) {
+          return repairLeg(range.nodes, rangeDepartureTime);
+        }
+
+        const middleIndex = Math.floor((range.nodes.length - 1) / 2);
+        const firstRange = {
+          startIndex: range.startIndex,
+          nodes: range.nodes.slice(0, middleIndex + 1)
+        };
+        const secondRange = {
+          startIndex: range.startIndex + middleIndex,
+          nodes: range.nodes.slice(middleIndex)
+        };
+        const firstLegs = await calculateRange(firstRange, rangeDepartureTime);
+        const secondDepartureTime = addSeconds(
+          firstLegs.at(-1).arrivalTimestamp,
+          range.nodes[middleIndex].pauseDurationInSeconds
+        );
+        const secondLegs = await calculateRange(secondRange, secondDepartureTime);
+
+        return [...firstLegs, ...secondLegs];
+      }
+
+      const invalidIndex = legs.findIndex(leg => !leg.reconstruction.valid);
+
+      if (invalidIndex === -1) {
+        return legs;
+      }
+
+      const validPrefix = legs.slice(0, invalidIndex);
+      const invalidDepartureTime = invalidIndex === 0
+        ? legs[invalidIndex].departureTime
+        : addSeconds(
+            validPrefix.at(-1).arrivalTimestamp,
+            range.nodes[invalidIndex].pauseDurationInSeconds
+          );
+      const repairedLegs = await repairLeg(
+        range.nodes.slice(invalidIndex, invalidIndex + 2),
+        invalidDepartureTime,
+        legs[invalidIndex]
+      );
+      const repairedLastLeg = repairedLegs.at(-1);
+      const accepted = [...validPrefix, ...repairedLegs];
+
+      if (invalidIndex === range.nodes.length - 2) {
+        return accepted;
+      }
+
+      const suffixStartIndex = invalidIndex + 1;
+      const suffix = {
+        startIndex: range.startIndex + suffixStartIndex,
+        nodes: range.nodes.slice(suffixStartIndex)
+      };
+      const suffixDepartureTime = addSeconds(
+        repairedLastLeg.arrivalTimestamp,
+        range.nodes[suffixStartIndex].pauseDurationInSeconds
+      );
+      const suffixLegs = await calculateRange(suffix, suffixDepartureTime);
+
+      return [...accepted, ...suffixLegs];
+    }
+
+    const legs = await calculateRange(chunk, departureTime);
+
+    return { legs, attemptCount, repairs, subdivisions, estimatedManeuvers };
+  }
+
   async function calculate(routeCode, options) {
     const routeData = await iettClient.getRoutePin(routeCode);
     const record = routeRecord(routeData, routeCode);
@@ -505,48 +1212,51 @@ export function createIettTravelTimeService({
       matchStopsToRoute(record.stationPlaces, geometry)
     );
     const nodes = selectRouteNodes(matchedStops, geometry, options);
-    const chunks = chunkRouteNodes(nodes);
-    const segments = [];
+    const { routingNodes, anchorCount } = buildRoutingNodes(
+      nodes,
+      geometry,
+      options.dwellTimeSeconds
+    );
+    const chunks = chunkRouteNodes(routingNodes);
+    const segmentAccumulators = createPublicSegments(nodes, options.dwellTimeSeconds);
+    const reconstructionRepairs = [];
+    const reconstructionSubdivisions = [];
+    const estimatedManeuvers = [];
+    let upstreamRequestCount = 0;
     let departureTime = options.departureTime;
 
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
       const chunk = chunks[chunkIndex];
       const isLastChunk = chunkIndex === chunks.length - 1;
-      const payload = createTomTomPayload(
+      const calculatedChunk = await calculateChunk(
         chunk,
         geometry,
-        departureTime,
-        options.dwellTimeSeconds
+        departureTime
       );
-      const data = await tomTomClient.calculateRoute(payload);
-      const legs = readTomTomLegs(data, chunk.nodes.length - 1);
+      const { legs } = calculatedChunk;
+
+      upstreamRequestCount += calculatedChunk.attemptCount;
+      reconstructionRepairs.push(...calculatedChunk.repairs);
+      reconstructionSubdivisions.push(...calculatedChunk.subdivisions);
+      estimatedManeuvers.push(...calculatedChunk.estimatedManeuvers);
 
       for (let legIndex = 0; legIndex < legs.length; legIndex += 1) {
         const leg = legs[legIndex];
-        const globalIndex = chunk.startIndex + legIndex;
-        const finalSegment = globalIndex === nodes.length - 2;
-        const dwellAfterArrivalSeconds = finalSegment ? 0 : options.dwellTimeSeconds;
+        const segment = segmentAccumulators[leg.publicSegmentIndex];
 
-        segments.push({
-          index: globalIndex,
-          from: publicNode(nodes[globalIndex]),
-          to: publicNode(nodes[globalIndex + 1]),
-          distanceMeters: leg.distanceMeters,
-          drivingDurationSeconds: leg.drivingDurationSeconds,
-          freeFlowDurationSeconds: leg.freeFlowDurationSeconds,
-          trafficDelaySeconds: leg.trafficDelaySeconds,
-          dwellAfterArrivalSeconds,
-          elapsedUntilNextDepartureSeconds: leg.drivingDurationSeconds
-            + dwellAfterArrivalSeconds,
-          departureTime: leg.departureTime,
-          arrivalTime: leg.arrivalTime
-        });
+        addProviderLeg(segment, leg);
       }
 
       if (!isLastChunk) {
-        departureTime = addSeconds(legs.at(-1).arrivalTimestamp, options.dwellTimeSeconds);
+        departureTime = addSeconds(
+          legs.at(-1).arrivalTimestamp,
+          chunk.nodes.at(-1).pauseDurationInSeconds
+        );
       }
     }
+
+    const segmentsWithReconstruction = finalizePublicSegments(segmentAccumulators);
+    const segments = segmentsWithReconstruction.map(({ reconstruction, ...segment }) => segment);
 
     const origin = nodes[0];
     const destination = nodes.at(-1);
@@ -564,10 +1274,33 @@ export function createIettTravelTimeService({
       segments
     };
 
+    if (estimatedManeuvers.length) {
+      result.routingQuality = "validated-with-iett-maneuver-estimate";
+      result.warnings = [{
+        code: "UNMAPPED_IETT_MANEUVER_ESTIMATED",
+        message: "TomTom could not represent a bus-only IETT section, so that section was estimated from the IETT geometry.",
+        count: estimatedManeuvers.length
+      }];
+    } else {
+      result.routingQuality = "tomtom-geometry-validated";
+    }
+
     if (options.debug) {
       result.debug = {
         chunkCount: chunks.length,
-        upstreamRequestCount: chunks.length,
+        upstreamRequestCount,
+        reconstructionRepairs,
+        reconstructionSubdivisions,
+        estimatedManeuvers,
+        routingAnchorCount: anchorCount,
+        routingNodeCount: routingNodes.length,
+        maximumReconstructionLegMeters: MAX_RECONSTRUCTION_LEG_METERS,
+        reconstruction: segmentsWithReconstruction.map(segment => ({
+          segmentIndex: segment.index,
+          from: segment.from.type === "station" ? segment.from.name : segment.from.type,
+          to: segment.to.type === "station" ? segment.to.name : segment.to.type,
+          ...segment.reconstruction
+        })),
         matchedStops: matchedStops.map(stop => ({
           name: stop.name,
           stationIndex: stop.stationIndex,

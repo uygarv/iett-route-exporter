@@ -349,6 +349,31 @@ curl -X POST http://localhost:3000/api/iett/routes/256_D_D0/travel-times \
 - `dwellTimeSeconds` defaults to `20` and accepts integers from `0` through `600`.
 - The existing `currentLocation`, `startStation`, and `endStation` rules also apply.
 
+The service sends each selected IETT geometry interval to TomTom and validates the
+returned path in both directions. Long stop gaps receive internal routing anchors,
+and a locally misaligned road can be retried with a small lane offset. A response is
+not accepted just because TomTom returned a route.
+
+Some IETT routes contain bus-only turns which do not exist in TomTom's car road
+graph. When a short maneuver, or a strongly turning section shorter than one
+kilometre, clearly becomes a large shortcut or detour, the service keeps the IETT
+geometry and estimates only that section. Such a response has:
+
+```json
+{
+  "routingQuality": "validated-with-iett-maneuver-estimate",
+  "warnings": [
+    {
+      "code": "UNMAPPED_IETT_MANEUVER_ESTIMATED"
+    }
+  ]
+}
+```
+
+Fully reconstructed responses use `routingQuality: "tomtom-geometry-validated"`.
+Larger unexplained mismatches fail with `IETT_ROUTE_RECONSTRUCTION_FAILED` instead
+of returning a misleading duration.
+
 ### Sample output
 
 ```json
@@ -356,6 +381,7 @@ curl -X POST http://localhost:3000/api/iett/routes/256_D_D0/travel-times \
   "routeCode": "256_D_D0",
   "provider": "tomtom-orbis",
   "trafficMode": "live",
+  "routingQuality": "tomtom-geometry-validated",
   "generatedAt": "2026-10-04T09:00:00.000Z",
   "origin": {
     "type": "station",
@@ -434,6 +460,10 @@ internal suffix such as `UZUNÇAYIR METROBÜS (1)` and
 - `startStation` and `currentLocation` cannot be supplied together.
 - TomTom's free allowance currently includes 20,000 Routing API requests per month;
 check the [current TomTom pricing](https://docs.tomtom.com/pricing) before deployment.
+- Accuracy repair may require more than one TomTom request. Identical successful
+travel-time requests share a 60-second in-memory cache.
+- Travel-time results are traffic-aware estimates, not an official IETT timetable
+or vehicle telemetry.
 
 
 ## Debug mode

@@ -42,7 +42,7 @@ export class TomTomClient {
           accept: "application/json",
           "content-type": "application/json",
           "tomtom-api-key": this.apiKey.trim(),
-          attributes: "routes(summary,legs.summary)"
+          attributes: "routes(summary,legs(summary,path))"
         },
         body: JSON.stringify(payload),
         signal: controller.signal
