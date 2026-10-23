@@ -1,0 +1,27 @@
+{
+  "routeId": "M8-OKUL",
+  "startStep": 2,
+  "departureTime": "2026-10-19T07:55:00+03:00",
+  "route": {
+    "1": { "type": "WALK", "duration": 15 },
+    "2": { "type": "METRO", "line": "M8", "duration": 15 },
+    "3": {
+      "type": "BUS_OPTIONS",
+      "options": {
+        "RING": {
+          "type": "RING",
+          "duration": 15,
+          "departures": ["08.15", "08.30"]
+        },
+        "19": {
+          "type": "BUS",
+          "line": "19",
+          "route": "19_D_D0",
+          "startStation": "ATAŞEHİR 100.YIL CUMHURİYET ANADOLU LİSESİ",
+          "endStation": "YEDİTEPE ÜNİVERSİTESİ KAMPÜSÜ",
+          "departures": ["08.20", "08.40"]
+        }
+      }
+    }
+  }
+}

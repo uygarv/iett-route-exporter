@@ -1,0 +1,67 @@
+{
+  "date": "2026-10-19",
+  "timezone": "Europe/Istanbul",
+  "recommendedOptionId": "1",
+  "options": [
+    {
+      "id": "1",
+      "route": "M8 + Bus 19",
+      "departure": "07:55",
+      "arrival": "08:30",
+      "durationMinutes": 35,
+      "transfers": 1,
+      "status": "Calculated",
+      "steps": [
+        {
+          "transport": "M8 metro",
+          "departure": "07:55",
+          "arrival": "08:10",
+          "durationMinutes": 15
+        },
+        {
+          "transport": "Wait",
+          "departure": "08:10",
+          "arrival": "08:20",
+          "durationMinutes": 10
+        },
+        {
+          "transport": "Bus 19",
+          "from": "ATAŞEHİR 100.YIL CUMHURİYET ANADOLU LİSESİ",
+          "to": "YEDİTEPE ÜNİVERSİTESİ KAMPÜSÜ",
+          "departure": "08:20",
+          "arrival": "08:30",
+          "durationMinutes": 10
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "route": "M8 + Campus shuttle",
+      "departure": "07:55",
+      "arrival": "08:35",
+      "durationMinutes": 40,
+      "transfers": 1,
+      "status": "Calculated",
+      "steps": [
+        {
+          "transport": "M8 metro",
+          "departure": "07:55",
+          "arrival": "08:10",
+          "durationMinutes": 15
+        },
+        {
+          "transport": "Wait",
+          "departure": "08:10",
+          "arrival": "08:15",
+          "durationMinutes": 5
+        },
+        {
+          "transport": "Campus shuttle",
+          "departure": "08:15",
+          "arrival": "08:35",
+          "durationMinutes": 20
+        }
+      ]
+    }
+  ]
+}

@@ -1,11 +1,16 @@
 import express from "express";
 import { AppError, toErrorBody } from "./shared/errors.js";
 import { createIettService } from "./services/iett-service.js";
+import { createJourneyService } from "./services/journey-service.js";
+import { summarizeCalculation, summarizeEvaluation } from "./journeys/response.js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-export function createApp({ service = createIettService() } = {}) {
+export function createApp({
+  service = createIettService(),
+  journeyService = createJourneyService({ calculateBusTimes: service.calculateIettRouteTimes })
+} = {}) {
   const app = express();
 
   app.disable("x-powered-by");
@@ -13,6 +18,22 @@ export function createApp({ service = createIettService() } = {}) {
 
   app.get("/health", (request, response) => {
     response.json({ status: "ok" });
+  });
+
+  app.post("/api/journeys/evaluate", async (request, response, next) => {
+    try {
+      response.json(summarizeEvaluation(await journeyService.evaluateJourneys(request.body)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/journeys/calculate", async (request, response, next) => {
+    try {
+      response.json(summarizeCalculation(await journeyService.calculateJourney(request.body)));
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/api/iett/lines/:lineCode", async (request, response, next) => {
