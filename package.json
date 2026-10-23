@@ -9,7 +9,6 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "benchmark:journeys": "node scripts/benchmark-journeys.js",
     "example": "node examples/line-256.js"
   },
   "dependencies": {

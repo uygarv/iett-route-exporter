@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { decodeFlexiblePolyline } from "../src/routing/flexible-polyline.js";
-import { encodePolyline } from "../test-support/here.js";
+import { encodePolyline } from "./fixtures/here.js";
 
 test("decodes the published HERE flexible-polyline example in GeoJSON order", () => {
   assert.deepEqual(decodeFlexiblePolyline("BFoz5xJ67i1B1B7PzIhaxL7Y").coordinates,

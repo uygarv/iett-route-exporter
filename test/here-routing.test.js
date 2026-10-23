@@ -6,7 +6,7 @@ import { decodeFlexiblePolyline } from "../src/routing/flexible-polyline.js";
 import { buildRouteGeometry, haversineDistance } from "../src/routing/geometry.js";
 import { AppError } from "../src/shared/errors.js";
 import { HERE_HTTP_ATTEMPTS } from "../src/clients/here-client.js";
-import { MockHereClient, routeData, withPath, section } from "../test-support/here.js";
+import { MockHereClient, routeData, withPath, section } from "./fixtures/here.js";
 
 const options = { provider: "here", departureTime: "2026-10-21T08:06:00+03:00", debug: true };
 function setup(client = new MockHereClient(), data = routeData(), extra = {}) {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createApp } from "../src/app.js";
 import { createIettService } from "../src/services/iett-service.js";
 import { HereClient } from "../src/clients/here-client.js";
-import { MockHereClient, routeData, length } from "../test-support/here.js";
+import { MockHereClient, routeData, length } from "./fixtures/here.js";
 
 test("travel-times selects HERE through the HTTP body and keeps TomTom as default", async () => {
   const here = new MockHereClient();

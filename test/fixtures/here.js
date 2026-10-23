@@ -1,5 +1,5 @@
-import { haversineDistance } from "../src/routing/geometry.js";
-import { AppError } from "../src/shared/errors.js";
+import { haversineDistance } from "../../src/routing/geometry.js";
+import { AppError } from "../../src/shared/errors.js";
 
 export function encodePolyline(points, precision = 6, third = false) {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
