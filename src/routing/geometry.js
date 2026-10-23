@@ -80,7 +80,7 @@ export function parseWktSegments(line) {
   });
 }
 
-export function buildRouteGeometry(line) {
+export function buildRouteGeometry(line, { minimumPointSpacingMeters = 2 } = {}) {
   const segments = parseWktSegments(line);
   const rawPointCount = segments.reduce((sum, segment) => sum + segment.length, 0);
   const points = [];
@@ -115,7 +115,7 @@ export function buildRouteGeometry(line) {
 
       const distance = haversineDistance(points.at(-1), point);
 
-      if (distance < 2) {
+      if (distance < minimumPointSpacingMeters) {
         continue;
       }
 

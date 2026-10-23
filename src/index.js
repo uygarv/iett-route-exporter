@@ -11,6 +11,7 @@ const defaultJourneyService = createJourneyService({
 
 export { IettClient, TomTomClient, createIettService, parseRouteCode };
 export { createTomTomScheduler } from "./clients/tomtom-scheduler.js";
+export { HereClient, createHereScheduler } from "./clients/here-client.js";
 export { DEFAULT_GEOMETRY_POLICY } from "./routing/geometry-match.js";
 export { createJourneyService };
 export { DEFAULT_SCORING_WEIGHTS } from "./journeys/scoring.js";

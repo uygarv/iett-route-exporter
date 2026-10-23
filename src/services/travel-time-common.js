@@ -140,7 +140,13 @@ export function validateTravelTimeOptions(input) {
     );
   }
 
+  const provider = options.provider === undefined ? "tomtom" : options.provider;
+  if (provider !== "tomtom" && provider !== "here") {
+    throw new AppError(400, "INVALID_PROVIDER", 'provider must be "tomtom" or "here".');
+  }
+
   return {
+    provider,
     startStation,
     endStation,
     currentLocation,
@@ -319,6 +325,7 @@ export function selectRouteNodes(matches, geometry, options) {
 export function cacheKey(routeCode, options) {
   return JSON.stringify({
     routeCode,
+    provider: options.provider,
     startStation: options.startStation,
     endStation: options.endStation,
     currentLocation: options.currentLocation
@@ -362,15 +369,15 @@ export function roundSegmentDistances(segments) {
 
 export function createRoutePreparation() {
   let preparedRoutes = new WeakMap();
-  function prepareRoute(record) {
+  function prepareRoute(record, provider = "tomtom") {
     // Geometry and stop matching depend on IETT data, not the departure instant.
     // Include a fingerprint so an updated record cannot reuse stale preparation.
     const fingerprint = createHash("sha256").update(JSON.stringify([record.line, record.stationPlaces])).digest("hex");
     const existing = preparedRoutes.get(record);
-    if (existing?.fingerprint === fingerprint) return existing;
-    const geometry = buildRouteGeometry(record.line);
+    if (existing?.fingerprint === fingerprint && existing.provider === provider) return existing;
+    const geometry = buildRouteGeometry(record.line, { minimumPointSpacingMeters: provider === "here" ? 0 : 2 });
     const matchedStops = addStationSequenceNumbers(matchStopsToRoute(record.stationPlaces, geometry));
-    const prepared = { fingerprint, geometry, matchedStops, sections: new Map() };
+    const prepared = { fingerprint, provider, geometry, matchedStops, sections: new Map() };
     preparedRoutes.set(record, prepared);
     return prepared;
   }

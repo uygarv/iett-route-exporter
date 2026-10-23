@@ -16,6 +16,8 @@ import {
   validateTravelTimeOptions, routeRecord, publicNode, cacheKey, compactGeometryMatch,
   roundSegmentDistances, createRoutePreparation, resultEnvelope
 } from "./travel-time-common.js";
+import { HereClient } from "../clients/here-client.js";
+import { createHereRoutingService } from "./here-travel-times.js";
 export { validateTravelTimeOptions } from "./travel-time-common.js";
 
 const MAX_ROUTING_ATTEMPTS = 3;
@@ -437,6 +439,7 @@ function finalizePublicSegments(segments) {
 export function createIettTravelTimeService({
   iettClient,
   tomTomClient,
+  hereClient = new HereClient(),
   cacheTtlMs = 60_000,
   geometryPolicy, shapeCacheTtlMs = 86_400_000, shapeCacheMaxEntries = 128, clock = Date.now
 }) {
@@ -450,6 +453,8 @@ export function createIettTravelTimeService({
   const preparingShapes = new Map();
   const preparation = createRoutePreparation();
   const { prepareRoute, prepareSection } = preparation;
+  const hereService = createHereRoutingService({ hereClient, geometryPolicy,
+    shapeCacheTtlMs, shapeCacheMaxEntries, clock });
   let cacheGeneration = 0;
 
   async function calculateAdaptiveRoute(nodes, geometry, options, learned) {
@@ -602,9 +607,12 @@ export function createIettTravelTimeService({
   async function calculate(routeCode, options) {
     const routeData = await iettClient.getRoutePin(routeCode);
     const record = routeRecord(routeData, routeCode);
-    const prepared = prepareRoute(record);
+    const prepared = prepareRoute(record, options.provider);
     const { geometry, matchedStops } = prepared;
     const { nodes } = prepareSection(prepared, options);
+    if (options.provider === "here") {
+      return hereService.calculate({ routeCode, prepared, nodes, options });
+    }
     const calculated = await calculateWithSharedShape(routeCode, prepared, nodes, options);
     const segmentAccumulators = createPublicSegments(nodes, options.dwellTimeSeconds);
     for (const leg of calculated.legs) addProviderLeg(segmentAccumulators[leg.publicSegmentIndex], leg);
@@ -747,6 +755,7 @@ export function createIettTravelTimeService({
       preparingShapes.clear();
       cacheGeneration += 1;
       preparation.clear();
+      hereService.clearCache();
     }
   };
 }

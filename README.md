@@ -62,13 +62,17 @@ You can override the port with `PORT` or the bind address with `HOST`:
 PORT=3000 HOST=0.0.0.0 npm start
 ```
 
-Internal travel time calculation uses TomTom Orbis. Create a TomTom API key
-and add to .env:
+Travel times use TomTom Orbis by default. The `travel-times` endpoint can also
+select HERE Routing v8. Configure the keys you use in `.env`:
 ```
 TOMTOM_API_KEY=xxxx
+HERE_API_KEY=xxxx
 ```
 
-The map URL endpoints do not require this key, this is only required for travel times.
+Only the selected provider's key is required. Map URL endpoints do not require
+these keys. HERE defaults to 2 requests/second, 2 concurrent requests and a
+20-second timeout. `HERE_REQUESTS_PER_SECOND` and `HERE_MAX_CONCURRENCY` configure
+its independent request queue.
 
 ## Example
 
@@ -335,9 +339,9 @@ CURRENT_LAT=40.99 CURRENT_LNG=29.13 npm run example
 ## Travel time
 
 This endpoint returns the total trip estimate and one segment for every pair of
-consecutive bus stops using TomTom traffic data.
+consecutive bus stops using the selected provider's traffic data.
 
-**This endpoint requires a TomTom API key.**
+**This endpoint requires the selected provider's API key.**
 
 ```bash
 curl -X POST http://localhost:3000/api/iett/routes/256_D_D0/travel-times \
@@ -351,7 +355,11 @@ curl -X POST http://localhost:3000/api/iett/routes/256_D_D0/travel-times \
   }'
 ```
 
-- `departureTime` accepts `"now"` or an ISO 8601 date time. When the value has no time zone offset, TomTom interprets it in the origin's local time zone.
+- `provider` accepts exactly `"tomtom"` (default) or `"here"`. Other values return
+  `400 INVALID_PROVIDER` before upstream calls. Response provider IDs remain
+  `"tomtom-orbis"` for TomTom and `"here"` for HERE.
+- `departureTime` accepts `"now"` or an ISO 8601 date time. An omitted offset
+  uses the origin's local time; HERE resolves these IETT times in Istanbul.
 - `dwellTimeSeconds` defaults to `15` and accepts integers from `0` through `600`.
 - The existing `currentLocation`, `startStation`, and `endStation` rules also apply.
 
@@ -601,6 +609,99 @@ scheduled time use `trafficTimeContext: "scheduled"` and
 information. A value of `0` does not mean that historical congestion was ignored.
 Orbis v3 does not expose a separate no-traffic duration, so the API intentionally
 does not return a derived `freeFlowDurationSeconds` value.
+
+### HERE travel times
+
+```bash
+curl -X POST http://localhost:3000/api/iett/routes/19_D_D0/travel-times \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider":"here",
+    "startStation":"UZUNÇAYIR METROBÜS",
+    "endStation":"YEDİTEPE ÜNİVERSİTESİ KAMPÜSÜ",
+    "departureTime":"2026-10-21T08:06:00+03:00",
+    "dwellTimeSeconds":15,
+    "debug":true
+  }'
+```
+
+HERE uses the **car** transport profile and imports the entire selected IETT
+trace through `POST /v8/import`. Every original vertex is retained, edges are
+sampled at intervals of at most five metres, and intermediate stops are supplied
+as trace indices with their dwell. Longer traces are split into overlapping
+request chunks within HERE's 50,000-point/10 MiB limits; a limit on one request
+never limits the length of an IETT line. Chunk departures include preceding
+driving, estimated sections and dwell. This feature does not generate HERE map URLs or change
+the provider used by journey endpoints.
+
+The returned polyline is checked against the IETT trace in both directions and
+in order, including all stops, endpoints and out-and-back sections. Nearby
+roads within the existing geometry limits can return an approximation warning.
+HERE's `importSplitRoute` notice is retained. The exported `geometry` is always
+the complete selected IETT LineString (`geometrySource: "iett"`), including loops
+and the original stop order. Provider geometry supplies validated timing; it
+does not replace the IETT route.
+
+Missing pieces receive up to two local HERE routing attempts per import chunk.
+If a local route cannot be validated, the original IETT interval receives an
+explicit duration estimate. **There is no maximum missing-section length or
+missing-coverage percentage that rejects a valid IETT route.** If an imported
+route takes a detour, reverses direction or omits a loop, its sections (and, when
+available, individual link spans) are validated separately. Only accepted timing
+is retained; the rejected source intervals are estimated. An exhausted repair
+budget affects timing coverage, never the existence of the line.
+
+`timingCoverage` reports provider and estimated distances on the original IETT
+line, their ratio, and whether provider timing covers the entire route. The
+separate `estimatedTraversalDistanceMeters` includes snapping connectors, which
+can be longer than the uncovered source distance. A route with **zero provider
+coverage** still returns its full geometry, stop timeline and conservative
+estimated time with `routingQuality: "iett-geometry-estimated-timing"`,
+`trafficDataBasis: "unavailable-estimated"` and `HERE_ROUTE_TIMING_UNAVAILABLE`.
+This is an explicitly estimated result, not a traffic-backed HERE ETA. Lower
+provider coverage means a less certain duration; geometry completeness does not
+guarantee ETA accuracy. Invalid IETT source data and provider infrastructure
+errors still return errors.
+
+HERE responses preserve the common `total` and `segments` structure:
+
+- `providerDrivingDurationSeconds` is driving time reported by HERE, excluding
+  dwell. `travelSummary.duration` is used instead of the dwell-inclusive summary.
+- `estimatedUnmappedDurationSeconds`, when present, is the separately calculated
+  time of missing connections. Each estimate uses at least eight seconds and a
+  speed no faster than 2.5 m/s or the adjacent provider section's speed (with a
+  numerical floor of 0.1 m/s). Without adjacent validated timing, 2.5 m/s is an
+  explicit conservative urban assumption. Debug intervals include the method
+  and speed. Long estimates are not presented as measured traffic.
+- `drivingDurationSeconds` is provider driving plus estimated connection time;
+  `estimatedDurationSeconds` adds dwell exactly once. Segment times conserve
+  those totals. Segment distances and stop progress follow the original IETT
+  line; span timing is interpolated within each validated source interval.
+  Estimated sections produce `UNMAPPED_IETT_SECTION_ESTIMATED` and, when some
+  provider timing is available, `routingQuality: "validated-with-iett-section-estimate"`.
+- `trafficDelaySeconds` is the nonnegative difference between total provider
+  driving and base driving time. It includes historical congestion and is not
+  labelled `liveTrafficDelaySeconds`; that TomTom field is absent on HERE results.
+- `debug` includes geometry metrics, local-repair outcomes, estimated intervals,
+  request counts, discarded provider sections, chunk validation, and the original
+  HERE `summary`/`travelSummary` durations. Top-level provider durations contain
+  only accepted timing, so discarded detours cannot inflate them.
+
+Successful HERE handles for every chunk are retained for up to 24 hours (128 entries), keyed by
+source geometry/stops, selected interval, car profile and dwell. Another departure
+gets a fresh traffic estimate using its handle; an invalid handle triggers a new
+import. Final results expire after 60 seconds. All caches and pending calculations
+are isolated by provider, and source changes or `clearIettCaches()` invalidate
+preparation. Each chunk uses one import or handle operation, up to two optional
+local repairs and, if necessary, one stale-handle refresh (at most four routing
+operations/eight HTTP attempts per chunk). Large lines scale by chunk count;
+the shared HERE queue still limits request rate and concurrency.
+Authentication, quota and transport failures do not trigger geometry repairs or
+an automatic switch to TomTom.
+
+References: [HERE Route Import](https://docs.here.com/routing/docs/routing-v8-route-import),
+[route handles](https://docs.here.com/routing/docs/routing-v8-whatis-route-handle),
+[duration definitions](https://docs.here.com/routing/docs/routing-v8-duration).
 
 ## Compare journeys
 

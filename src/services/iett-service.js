@@ -8,6 +8,7 @@ import { buildGoogleMapsUrl } from "../providers/google-maps.js";
 import { buildYandexMapsUrl } from "../providers/yandex-maps.js";
 import { IettClient } from "../clients/iett-client.js";
 import { TomTomClient } from "../clients/tomtom-client.js";
+import { HereClient } from "../clients/here-client.js";
 import {
   parseCoordinate,
   readOptionalCoordinate,
@@ -317,6 +318,7 @@ function publicVariant(variant) {
 export function createIettService({
   client = new IettClient(),
   tomTomClient = new TomTomClient(),
+  hereClient = new HereClient(),
   timingCacheTtlMs = 60_000,
   geometryPolicy,
   shapeCacheTtlMs = 86_400_000,
@@ -326,6 +328,7 @@ export function createIettService({
   const travelTimeService = createIettTravelTimeService({
     iettClient: client,
     tomTomClient,
+    hereClient,
     cacheTtlMs: timingCacheTtlMs,
     geometryPolicy, shapeCacheTtlMs, shapeCacheMaxEntries, clock
   });
