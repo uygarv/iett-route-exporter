@@ -6,6 +6,8 @@ const defaultClient = new IettClient();
 const defaultService = createIettService({ client: defaultClient });
 
 export { IettClient, TomTomClient, createIettService, parseRouteCode };
+export { createTomTomScheduler } from "./clients/tomtom-scheduler.js";
+export { DEFAULT_GEOMETRY_POLICY } from "./routing/geometry-match.js";
 
 export const getIettRouteOptions = defaultService.getIettRouteOptions;
 export const prepareIettLine = defaultService.prepareIettLine;

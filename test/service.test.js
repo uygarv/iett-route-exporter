@@ -27,6 +27,25 @@ test("parses route codes without limiting direction identifiers", () => {
   });
 });
 
+test("IETT records expire 24 hours after completion and keep sharing pending refreshes", async () => {
+  let now = 0, calls = 0;
+  const client = new IettClient({ clock: () => now, fetchImpl: async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ version: calls }));
+  } });
+  const first = client.getRoutePin("256_D_D0");
+  assert.equal(client.getRoutePin("256_D_D0"), first);
+  assert.deepEqual(await first, { version: 1 });
+  now = 86_399_999;
+  assert.equal(client.getRoutePin("256_D_D0"), first);
+  now += 1;
+  const refreshed = client.getRoutePin("256_D_D0");
+  assert.equal(client.getRoutePin("256_D_D0"), refreshed);
+  assert.notEqual(refreshed, first);
+  assert.deepEqual(await refreshed, { version: 2 });
+  assert.equal(calls, 2);
+});
+
 test("validates the minimum route-pin response shape", () => {
   assert.equal(isValidRoutePinResponse(routeData()), true);
   assert.equal(isValidRoutePinResponse([]), false);

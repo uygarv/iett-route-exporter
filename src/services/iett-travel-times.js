@@ -1,392 +1,30 @@
+import { TOMTOM_HTTP_ATTEMPTS } from "../clients/tomtom-scheduler.js";
 import { AppError } from "../shared/errors.js";
-import { parseCoordinate } from "../shared/validation.js";
 import {
   buildRouteGeometry,
-  findClosestRoutePosition,
-  findRoutePositionCandidates,
   haversineDistance,
-  resampleRoute,
   pointAlongRoute
 } from "../routing/geometry.js";
-import { matchStopsToRoute, sliceRouteGeometry } from "../routing/timing.js";
+import { sliceRouteGeometry } from "../routing/timing.js";
 import {
-  addStationSequenceNumbers,
-  findStationsByName
-} from "../routing/stations.js";
+  createTomTomControls, isTomTomAlternativeLeg, localTomTomPlan, waypointOnlyTomTomPlan
+} from "../routing/tomtom-controls.js";
+import { evaluateTomTomLocalAlternative } from "../routing/tomtom-local-alternative.js";
+import { distributeTomTomLegs } from "../routing/tomtom-stop-times.js";
+import { createGeometryMatcher, compareGeometryMatches } from "../routing/geometry-match.js";
+import {
+  validateTravelTimeOptions, routeRecord, publicNode, cacheKey, compactGeometryMatch,
+  roundSegmentDistances, createRoutePreparation, resultEnvelope
+} from "./travel-time-common.js";
+export { validateTravelTimeOptions } from "./travel-time-common.js";
 
-const MAX_NODES_PER_REQUEST = 152;
-const MAX_RECONSTRUCTION_LEG_METERS = 1_000;
-const DEFAULT_DWELL_TIME_SECONDS = 20;
-const MAX_DWELL_TIME_SECONDS = 600;
-const MAX_CURRENT_LOCATION_DISTANCE_METERS = 500;
-const MAX_RECONSTRUCTION_ENDPOINT_OFFSET_METERS = 40;
-const MAX_RECONSTRUCTION_P95_DEVIATION_METERS = 35;
-const MAX_RECONSTRUCTION_DEVIATION_METERS = 80;
-const RECONSTRUCTION_LANE_OFFSETS_METERS = [0, 4, -4, 8, -8, 12, -12, 16, -16];
-const MIN_REPAIR_SPLIT_METERS = 25;
+const MAX_ROUTING_ATTEMPTS = 3;
 const MAX_UNMAPPED_MANEUVER_METERS = 75;
 const MAX_UNMAPPED_ROUTE_SECTION_METERS = 1_000;
 const MIN_UNMAPPED_MANEUVER_TURN_DEGREES = 60;
 const MIN_LONG_UNMAPPED_SECTION_TURN_DEGREES = 135;
 const UNMAPPED_MANEUVER_SPEED_METERS_PER_SECOND = 2.5;
 const MIN_UNMAPPED_MANEUVER_DURATION_SECONDS = 8;
-const EARTH_RADIUS_METERS = 6_371_008.8;
-
-function readStationOption(options, fieldName) {
-  const errorField = fieldName === "startStation"
-    ? "START_STATION"
-    : "END_STATION";
-
-  if (options[fieldName] === undefined) {
-    return null;
-  }
-
-  if (typeof options[fieldName] !== "string") {
-    throw new AppError(400, `INVALID_${errorField}`, `${fieldName} must be a string.`);
-  }
-
-  const value = options[fieldName].trim();
-
-  if (!value || value.length > 200) {
-    throw new AppError(400, `INVALID_${errorField}`, `${fieldName} is invalid.`);
-  }
-
-  return value;
-}
-
-function validateDepartureTime(value) {
-  if (value === undefined || value === "now") {
-    return "now";
-  }
-
-  if (typeof value !== "string") {
-    throw new AppError(
-      400,
-      "INVALID_DEPARTURE_TIME",
-      'departureTime must be "now" or an ISO 8601 date-time.'
-    );
-  }
-
-  const trimmed = value.trim();
-  const match = trimmed.match(
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:\d{2})?$/i
-  );
-  const parsed = new Date(trimmed);
-
-  if (!match || Number.isNaN(parsed.getTime())) {
-    throw new AppError(
-      400,
-      "INVALID_DEPARTURE_TIME",
-      'departureTime must be "now" or an ISO 8601 date-time.'
-    );
-  }
-
-  const [, year, month, day, hour, minute, second = "0"] = match;
-  const validationDate = new Date(Date.UTC(
-    Number(year),
-    Number(month) - 1,
-    Number(day),
-    Number(hour),
-    Number(minute),
-    Number(second)
-  ));
-  const validComponents = validationDate.getUTCFullYear() === Number(year)
-    && validationDate.getUTCMonth() === Number(month) - 1
-    && validationDate.getUTCDate() === Number(day)
-    && validationDate.getUTCHours() === Number(hour)
-    && validationDate.getUTCMinutes() === Number(minute)
-    && validationDate.getUTCSeconds() === Number(second);
-
-  if (!validComponents) {
-    throw new AppError(
-      400,
-      "INVALID_DEPARTURE_TIME",
-      'departureTime must be "now" or an ISO 8601 date-time.'
-    );
-  }
-
-  return match[8] ? parsed.toISOString() : trimmed;
-}
-
-export function validateTravelTimeOptions(input) {
-  const options = input ?? {};
-
-  if (!options || typeof options !== "object" || Array.isArray(options)) {
-    throw new AppError(400, "INVALID_OPTIONS", "Travel-time options must be an object.");
-  }
-
-  if (options.debug !== undefined && typeof options.debug !== "boolean") {
-    throw new AppError(400, "INVALID_DEBUG", "debug must be a boolean.");
-  }
-
-  const dwellTimeSeconds = options.dwellTimeSeconds ?? DEFAULT_DWELL_TIME_SECONDS;
-
-  if (
-    !Number.isInteger(dwellTimeSeconds)
-    || dwellTimeSeconds < 0
-    || dwellTimeSeconds > MAX_DWELL_TIME_SECONDS
-  ) {
-    throw new AppError(
-      400,
-      "INVALID_DWELL_TIME",
-      `dwellTimeSeconds must be an integer from 0 to ${MAX_DWELL_TIME_SECONDS}.`
-    );
-  }
-
-  const startStation = readStationOption(options, "startStation");
-  const endStation = readStationOption(options, "endStation");
-  const currentLocation = options.currentLocation === undefined
-    ? null
-    : parseCoordinate(options.currentLocation, "currentLocation");
-
-  if (startStation && currentLocation) {
-    throw new AppError(
-      400,
-      "CONFLICTING_START_OPTIONS",
-      "Use either currentLocation or startStation, not both."
-    );
-  }
-
-  return {
-    startStation,
-    endStation,
-    currentLocation,
-    departureTime: validateDepartureTime(options.departureTime),
-    dwellTimeSeconds,
-    debug: options.debug ?? false
-  };
-}
-
-function routeRecord(data, routeCode) {
-  if (!Array.isArray(data)) {
-    throw new AppError(502, "IETT_MALFORMED_RESPONSE", "IETT returned an invalid route response.", {
-      routeCode
-    });
-  }
-
-  if (!data.length) {
-    throw new AppError(404, "IETT_ROUTE_NOT_FOUND", "IETT returned no data for this route code.", {
-      routeCode
-    });
-  }
-
-  const record = data[0];
-
-  if (!record || typeof record.line !== "string" || !record.line.trim()) {
-    throw new AppError(502, "IETT_MALFORMED_RESPONSE", "IETT returned a route without geometry.", {
-      routeCode
-    });
-  }
-
-  if (!Array.isArray(record.stationPlaces) || record.stationPlaces.length < 2) {
-    throw new AppError(502, "IETT_INVALID_STOPS", "The IETT route must contain at least two stops.", {
-      routeCode
-    });
-  }
-
-  return record;
-}
-
-function selectStation(matches, requestedName, role) {
-  if (!requestedName) {
-    return role === "start" ? matches[0] : matches.at(-1);
-  }
-
-  const found = findStationsByName(matches, requestedName);
-  const codePrefix = role.toUpperCase();
-
-  if (!found.length) {
-    throw new AppError(
-      400,
-      `${codePrefix}_STATION_NOT_FOUND`,
-      `The requested ${role} station does not exist on this route.`,
-      { [`${role}Station`]: requestedName }
-    );
-  }
-
-  if (found.length > 1) {
-    throw new AppError(
-      400,
-      `AMBIGUOUS_${codePrefix}_STATION`,
-      "The requested station occurs more than once on this route.",
-      {
-        [`${role}Station`]: requestedName,
-        stationIndexes: found.map(stop => stop.stationIndex),
-        candidates: found.map(stop => ({
-          stationIndex: stop.stationIndex,
-          name: stop.name,
-          lat: stop.coordinate.lat,
-          lng: stop.coordinate.lng
-        }))
-      }
-    );
-  }
-
-  return found[0];
-}
-
-function stationNode(stop) {
-  return {
-    type: "station",
-    name: stop.name,
-    stationIndex: stop.stationIndex,
-    lat: stop.coordinate.lat,
-    lng: stop.coordinate.lng,
-    distanceAlongRoute: stop.distanceAlongRoute,
-    providerCoordinate: stop.providerCoordinate
-  };
-}
-
-function currentLocationNode(location, routeMatch) {
-  return {
-    type: "current-location",
-    lat: location.lat,
-    lng: location.lng,
-    distanceAlongRoute: routeMatch.distanceAlongRoute,
-    providerCoordinate: {
-      lat: routeMatch.lat,
-      lng: routeMatch.lng
-    }
-  };
-}
-
-function publicNode(node) {
-  const result = {
-    type: node.type,
-    lat: node.lat,
-    lng: node.lng
-  };
-
-  if (node.type === "station") {
-    result.name = node.name;
-    result.stationIndex = node.stationIndex;
-  }
-
-  return result;
-}
-
-function selectRouteNodes(matches, geometry, options) {
-  const end = selectStation(matches, options.endStation, "end");
-  let start;
-  let nodes;
-
-  if (options.currentLocation) {
-    const routeMatch = findClosestRoutePosition(geometry, options.currentLocation);
-
-    if (routeMatch.distanceToRoute > MAX_CURRENT_LOCATION_DISTANCE_METERS) {
-      throw new AppError(
-        400,
-        "CURRENT_LOCATION_OFF_ROUTE",
-        "The current location is more than 500 metres from this route.",
-        { distanceMeters: Math.round(routeMatch.distanceToRoute) }
-      );
-    }
-
-    if (routeMatch.ambiguous) {
-      throw new AppError(
-        400,
-        "AMBIGUOUS_CURRENT_LOCATION",
-        "The current location matches multiple distant positions along this route."
-      );
-    }
-
-    start = currentLocationNode(options.currentLocation, routeMatch);
-    nodes = [start, ...matches
-      .filter(stop => {
-        return stop.distanceAlongRoute > start.distanceAlongRoute + 1
-          && stop.distanceAlongRoute <= end.distanceAlongRoute + 1;
-      })
-      .map(stationNode)];
-  } else {
-    const selectedStart = selectStation(matches, options.startStation, "start");
-    start = stationNode(selectedStart);
-    nodes = matches
-      .filter(stop => {
-        return stop.stationIndex >= selectedStart.stationIndex
-          && stop.stationIndex <= end.stationIndex;
-      })
-      .map(stationNode);
-  }
-
-  if (end.distanceAlongRoute <= start.distanceAlongRoute + 1 || nodes.length < 2) {
-    throw new AppError(
-      400,
-      "INVALID_STATION_RANGE",
-      "The end station must come after the selected route start.",
-      {
-        startDistanceAlongRoute: start.distanceAlongRoute,
-        endDistanceAlongRoute: end.distanceAlongRoute
-      }
-    );
-  }
-
-  return nodes;
-}
-
-function buildRoutingNodes(nodes, geometry, dwellTimeSeconds) {
-  const routingNodes = [{
-    ...nodes[0],
-    publicSegmentIndex: null,
-    pauseDurationInSeconds: 0
-  }];
-  let anchorCount = 0;
-
-  for (let segmentIndex = 0; segmentIndex < nodes.length - 1; segmentIndex += 1) {
-    const from = nodes[segmentIndex];
-    const to = nodes[segmentIndex + 1];
-    const segmentLength = to.distanceAlongRoute - from.distanceAlongRoute;
-    const partCount = Math.max(
-      1,
-      Math.ceil(segmentLength / MAX_RECONSTRUCTION_LEG_METERS)
-    );
-
-    for (let partIndex = 1; partIndex < partCount; partIndex += 1) {
-      const distanceAlongRoute = from.distanceAlongRoute
-        + segmentLength * partIndex / partCount;
-      const point = pointAlongRoute(geometry, distanceAlongRoute);
-
-      routingNodes.push({
-        type: "route-anchor",
-        lat: point.lat,
-        lng: point.lng,
-        providerCoordinate: { lat: point.lat, lng: point.lng },
-        distanceAlongRoute: point.distanceAlongRoute,
-        publicSegmentIndex: segmentIndex,
-        pauseDurationInSeconds: 0
-      });
-      anchorCount += 1;
-    }
-
-    routingNodes.push({
-      ...to,
-      publicSegmentIndex: segmentIndex,
-      pauseDurationInSeconds: segmentIndex < nodes.length - 2 && to.type === "station"
-        ? dwellTimeSeconds
-        : 0
-    });
-  }
-
-  return { routingNodes, anchorCount };
-}
-
-function chunkRouteNodes(nodes) {
-  const chunks = [];
-  let startIndex = 0;
-
-  while (startIndex < nodes.length - 1) {
-    const endIndex = Math.min(startIndex + MAX_NODES_PER_REQUEST - 1, nodes.length - 1);
-
-    chunks.push({
-      startIndex,
-      endIndex,
-      nodes: nodes.slice(startIndex, endIndex + 1)
-    });
-
-    startIndex = endIndex;
-  }
-
-  return chunks;
-}
 
 function pointGeoJson(coordinate) {
   return {
@@ -395,91 +33,20 @@ function pointGeoJson(coordinate) {
   };
 }
 
-function offsetRouteCoordinate(geometry, distanceAlongRoute, offsetMeters) {
-  const point = pointAlongRoute(geometry, distanceAlongRoute);
-
-  if (offsetMeters === 0) {
-    return { lat: point.lat, lng: point.lng };
-  }
-
-  const before = pointAlongRoute(geometry, distanceAlongRoute - 15);
-  const after = pointAlongRoute(geometry, distanceAlongRoute + 15);
-  const projectedBefore = geometry.projector.project(before);
-  const projectedAfter = geometry.projector.project(after);
-  const east = projectedAfter.x - projectedBefore.x;
-  const north = projectedAfter.y - projectedBefore.y;
-  const length = Math.hypot(east, north);
-
-  if (length < 1) {
-    return { lat: point.lat, lng: point.lng };
-  }
-
-  const rightEast = north / length * offsetMeters;
-  const rightNorth = -east / length * offsetMeters;
-  const latitudeRadians = point.lat * Math.PI / 180;
-
-  return {
-    lat: point.lat + rightNorth / EARTH_RADIUS_METERS * 180 / Math.PI,
-    lng: point.lng
-      + rightEast / (EARTH_RADIUS_METERS * Math.cos(latitudeRadians))
-        * 180 / Math.PI
-  };
-}
-
-function shiftPathRight(points, offsetMeters) {
-  if (offsetMeters === 0) {
-    return points.map(point => ({ ...point }));
-  }
-
-  const centerLatitude = points.reduce((sum, point) => sum + point.lat, 0) / points.length;
-  const cosine = Math.cos(centerLatitude * Math.PI / 180);
-
-  return points.map((point, index) => {
-    const before = points[Math.max(0, index - 1)];
-    const after = points[Math.min(points.length - 1, index + 1)];
-    const east = (after.lng - before.lng) * Math.PI / 180
-      * EARTH_RADIUS_METERS * cosine;
-    const north = (after.lat - before.lat) * Math.PI / 180
-      * EARTH_RADIUS_METERS;
-    const length = Math.hypot(east, north);
-
-    if (length < 1) {
-      return { ...point };
-    }
-
-    const rightEast = north / length * offsetMeters;
-    const rightNorth = -east / length * offsetMeters;
-
-    return {
-      lat: point.lat + rightNorth / EARTH_RADIUS_METERS * 180 / Math.PI,
-      lng: point.lng
-        + rightEast / (EARTH_RADIUS_METERS * cosine) * 180 / Math.PI
-    };
-  });
-}
-
-function coordinateForRoutingNode(node, geometry, laneOffsetMeters) {
-  if (laneOffsetMeters === 0) {
-    return node.providerCoordinate;
-  }
-
-  return offsetRouteCoordinate(geometry, node.distanceAlongRoute, laneOffsetMeters);
-}
-
-function createTomTomPayload(chunk, geometry, departureTime, laneOffsetMeters = 0) {
+function createTomTomPayload(chunk, geometry, departureTime, plan) {
   const first = chunk.nodes[0];
   const last = chunk.nodes.at(-1);
   const intermediate = chunk.nodes.slice(1, -1);
   const routePlanningLocations = {
-    origin: pointGeoJson(coordinateForRoutingNode(first, geometry, laneOffsetMeters)),
-    destination: pointGeoJson(coordinateForRoutingNode(last, geometry, laneOffsetMeters))
+    origin: pointGeoJson(first.providerCoordinate),
+    destination: pointGeoJson(last.providerCoordinate)
   };
 
   if (intermediate.length) {
     routePlanningLocations.waypoints = {
       type: "MultiPoint",
       coordinates: intermediate.map(node => {
-        const coordinate = coordinateForRoutingNode(node, geometry, laneOffsetMeters);
+        const coordinate = node.providerCoordinate;
 
         return [coordinate.lng, coordinate.lat];
       })
@@ -493,15 +60,15 @@ function createTomTomPayload(chunk, geometry, departureTime, laneOffsetMeters = 
       previousNode.distanceAlongRoute,
       node.distanceAlongRoute
     );
-    const legPath = shiftPathRight(originalLegPath, laneOffsetMeters);
-    const start = coordinateForRoutingNode(previousNode, geometry, laneOffsetMeters);
-    const end = coordinateForRoutingNode(node, geometry, laneOffsetMeters);
+    const legPath = originalLegPath;
+    const start = previousNode.providerCoordinate;
+    const end = node.providerCoordinate;
 
     legPath[0] = start;
     legPath[legPath.length - 1] = end;
     const finalArrivalInChunk = index === arrivals.length - 1;
-    const leg = {
-      path: {
+    const leg = plan && isTomTomAlternativeLeg(plan, previousNode.distanceAlongRoute, node.distanceAlongRoute)
+      ? {} : { path: {
         type: "LineString",
         coordinates: legPath.map(point => [point.lng, point.lat])
       }
@@ -587,74 +154,6 @@ function geometryFromPoints(points, legIndex) {
   }
 }
 
-function percentile(values, fraction) {
-  const sorted = [...values].sort((first, second) => first - second);
-  const index = Math.max(0, Math.ceil(sorted.length * fraction) - 1);
-
-  return sorted[index] ?? 0;
-}
-
-function distanceDistribution(source, target) {
-  const spacing = Math.min(15, Math.max(3, source.totalLength / 10));
-  const distances = resampleRoute(source, spacing).map(point => {
-    return findRoutePositionCandidates(target, point).reduce((best, match) => {
-      return Math.min(best, match.distanceToRoute);
-    }, Infinity);
-  });
-
-  return {
-    percentile95: percentile(distances, 0.95),
-    maximum: Math.max(...distances)
-  };
-}
-
-function roundedMetrics(metrics) {
-  return Object.fromEntries(Object.entries(metrics).map(([key, value]) => {
-    return [key, Math.round(value * 10) / 10];
-  }));
-}
-
-function validateReconstructedLeg(requestPath, responsePath, reportedLength, legIndex) {
-  const requestedPoints = pathCoordinates(requestPath, legIndex);
-  const returnedPoints = pathCoordinates(responsePath, legIndex);
-  const requestedGeometry = geometryFromPoints(requestedPoints, legIndex);
-  const returnedGeometry = geometryFromPoints(returnedPoints, legIndex);
-  const requestedToReturned = distanceDistribution(requestedGeometry, returnedGeometry);
-  const returnedToRequested = distanceDistribution(returnedGeometry, requestedGeometry);
-  const startOffset = haversineDistance(requestedPoints[0], returnedPoints[0]);
-  const endOffset = haversineDistance(requestedPoints.at(-1), returnedPoints.at(-1));
-  const referenceLength = requestedGeometry.totalLength;
-  const returnedPathLength = returnedGeometry.totalLength;
-  const reportedLengthDelta = Math.abs(reportedLength - referenceLength);
-  const returnedPathLengthDelta = Math.abs(reportedLength - returnedPathLength);
-  const allowedReportedLengthDelta = Math.max(60, referenceLength * 0.35);
-  const allowedReturnedPathLengthDelta = Math.max(75, returnedPathLength * 0.25);
-  const metrics = {
-    referenceLengthMeters: referenceLength,
-    returnedLengthMeters: reportedLength,
-    returnedPathLengthMeters: returnedPathLength,
-    startOffsetMeters: startOffset,
-    endOffsetMeters: endOffset,
-    referenceToReturnedP95Meters: requestedToReturned.percentile95,
-    referenceToReturnedMaxMeters: requestedToReturned.maximum,
-    returnedToReferenceP95Meters: returnedToRequested.percentile95,
-    returnedToReferenceMaxMeters: returnedToRequested.maximum
-  };
-  const deviates = startOffset > MAX_RECONSTRUCTION_ENDPOINT_OFFSET_METERS
-    || endOffset > MAX_RECONSTRUCTION_ENDPOINT_OFFSET_METERS
-    || requestedToReturned.percentile95 > MAX_RECONSTRUCTION_P95_DEVIATION_METERS
-    || returnedToRequested.percentile95 > MAX_RECONSTRUCTION_P95_DEVIATION_METERS
-    || requestedToReturned.maximum > MAX_RECONSTRUCTION_DEVIATION_METERS
-    || returnedToRequested.maximum > MAX_RECONSTRUCTION_DEVIATION_METERS
-    || reportedLengthDelta > allowedReportedLengthDelta
-    || returnedPathLengthDelta > allowedReturnedPathLengthDelta;
-
-  return {
-    ...roundedMetrics(metrics),
-    valid: !deviates
-  };
-}
-
 function readTomTomLegs(data, requestLegs) {
   const route = data?.routes?.[0];
   const expectedCount = requestLegs.length;
@@ -700,18 +199,20 @@ function readTomTomLegs(data, requestLegs) {
       );
     }
 
-    const reconstruction = validateReconstructedLeg(
-      requestLegs[index].path,
-      leg?.path,
-      lengthInMeters,
-      index
-    );
+    const points = pathCoordinates(leg?.path, index);
+    const returnedGeometry = geometryFromPoints(points, index);
+    const reconstruction = {
+      valid: true, referenceLengthMeters: 0, returnedLengthMeters: lengthInMeters,
+      returnedPathLengthMeters: returnedGeometry.totalLength,
+      referenceToReturnedP95Meters: 0, referenceToReturnedMaxMeters: 0,
+      returnedToReferenceP95Meters: 0, returnedToReferenceMaxMeters: 0
+    };
 
     return {
+      path: leg.path,
       distanceMeters: lengthInMeters,
       drivingDurationSeconds: travelDurationInSeconds,
-      trafficDelaySeconds: trafficDelayDurationInSeconds,
-      freeFlowDurationSeconds: travelDurationInSeconds - trafficDelayDurationInSeconds,
+      liveTrafficDelaySeconds: trafficDelayDurationInSeconds,
       departureTime: summary.departureDateTime,
       arrivalTime: summary.arrivalDateTime,
       arrivalTimestamp: arrival.getTime(),
@@ -804,7 +305,7 @@ function estimatedManeuverLeg(maneuver, departureTime, failedLeg) {
     maneuver.length / estimatedSpeed
   ));
   const trafficRatio = failedLeg?.drivingDurationSeconds > 0
-    ? failedLeg.trafficDelaySeconds / failedLeg.drivingDurationSeconds
+    ? failedLeg.liveTrafficDelaySeconds / failedLeg.drivingDurationSeconds
     : 0;
   const trafficDelay = Math.min(duration, Math.round(duration * trafficRatio));
   const arrivalTimestamp = departureTimestamp + duration * 1_000;
@@ -812,8 +313,7 @@ function estimatedManeuverLeg(maneuver, departureTime, failedLeg) {
   return {
     distanceMeters: maneuver.length,
     drivingDurationSeconds: duration,
-    trafficDelaySeconds: trafficDelay,
-    freeFlowDurationSeconds: duration - trafficDelay,
+    liveTrafficDelaySeconds: trafficDelay,
     departureTime: new Date(departureTimestamp).toISOString(),
     arrivalTime: new Date(arrivalTimestamp).toISOString(),
     arrivalTimestamp,
@@ -839,16 +339,14 @@ function totalFromSegments(segments) {
     result.distanceMeters += segment.distanceMeters;
     result.drivingDurationSeconds += segment.drivingDurationSeconds;
     result.dwellDurationSeconds += segment.dwellAfterArrivalSeconds;
-    result.freeFlowDurationSeconds += segment.freeFlowDurationSeconds;
-    result.trafficDelaySeconds += segment.trafficDelaySeconds;
+    result.liveTrafficDelaySeconds += segment.liveTrafficDelaySeconds;
     result.estimatedManeuverDurationSeconds += segment.estimatedManeuverDurationSeconds ?? 0;
     return result;
   }, {
     distanceMeters: 0,
     drivingDurationSeconds: 0,
     dwellDurationSeconds: 0,
-    freeFlowDurationSeconds: 0,
-    trafficDelaySeconds: 0,
+    liveTrafficDelaySeconds: 0,
     estimatedManeuverDurationSeconds: 0
   });
 
@@ -870,8 +368,7 @@ function createPublicSegments(nodes, dwellTimeSeconds) {
     to: publicNode(nodes[index + 1]),
     distanceMeters: 0,
     drivingDurationSeconds: 0,
-    freeFlowDurationSeconds: 0,
-    trafficDelaySeconds: 0,
+    liveTrafficDelaySeconds: 0,
     estimatedManeuverDurationSeconds: 0,
     dwellAfterArrivalSeconds: index === nodes.length - 2 ? 0 : dwellTimeSeconds,
     departureTime: null,
@@ -890,8 +387,9 @@ function createPublicSegments(nodes, dwellTimeSeconds) {
 function addProviderLeg(segment, leg) {
   segment.distanceMeters += leg.distanceMeters;
   segment.drivingDurationSeconds += leg.drivingDurationSeconds;
-  segment.freeFlowDurationSeconds += leg.freeFlowDurationSeconds;
-  segment.trafficDelaySeconds += leg.trafficDelaySeconds;
+  segment.stopTimingSource = segment.stopTimingSource && segment.stopTimingSource !== leg.stopTimingSource
+    ? "mixed-interpolation" : leg.stopTimingSource;
+  segment.liveTrafficDelaySeconds += leg.liveTrafficDelaySeconds;
   segment.estimatedManeuverDurationSeconds += leg.estimatedManeuverDurationSeconds ?? 0;
   segment.departureTime ??= leg.departureTime;
   segment.arrivalTime = leg.arrivalTime;
@@ -936,365 +434,252 @@ function finalizePublicSegments(segments) {
   });
 }
 
-function cacheKey(routeCode, options) {
-  return JSON.stringify({
-    routeCode,
-    startStation: options.startStation,
-    endStation: options.endStation,
-    currentLocation: options.currentLocation
-      ? {
-          lat: Number(options.currentLocation.lat.toFixed(6)),
-          lng: Number(options.currentLocation.lng.toFixed(6))
-        }
-      : null,
-    departureTime: options.departureTime,
-    dwellTimeSeconds: options.dwellTimeSeconds,
-    debug: options.debug
-  });
-}
-
 export function createIettTravelTimeService({
   iettClient,
   tomTomClient,
-  cacheTtlMs = 60_000
+  cacheTtlMs = 60_000,
+  geometryPolicy, shapeCacheTtlMs = 86_400_000, shapeCacheMaxEntries = 128, clock = Date.now
 }) {
+  if (!Number.isInteger(shapeCacheMaxEntries) || shapeCacheMaxEntries < 1
+    || !Number.isFinite(shapeCacheTtlMs) || shapeCacheTtlMs < 0) {
+    throw new RangeError("Invalid journey shape cache configuration.");
+  }
   const cache = new Map();
+  const matcher = createGeometryMatcher({ policy: geometryPolicy });
+  const shapes = new Map();
+  const preparingShapes = new Map();
+  const preparation = createRoutePreparation();
+  const { prepareRoute, prepareSection } = preparation;
+  let cacheGeneration = 0;
 
-  async function calculateChunk(chunk, geometry, departureTime) {
-    let attemptCount = 0;
-    const repairs = [];
-    const subdivisions = [];
-    const estimatedManeuvers = [];
-
-    async function callTomTom(payload) {
-      for (let retry = 0; retry <= 2; retry += 1) {
-        attemptCount += 1;
-
-        try {
-          return await tomTomClient.calculateRoute(payload);
-        } catch (error) {
-          const retryAfterSeconds = Number(error?.details?.retryAfter);
-          const canRetry = error?.code === "TOMTOM_RATE_LIMITED"
-            && Number.isFinite(retryAfterSeconds)
-            && retryAfterSeconds > 0
-            && retryAfterSeconds <= 5
-            && retry < 2;
-
-          if (!canRetry) {
-            throw error;
-          }
-
-          await new Promise(resolve => {
-            setTimeout(resolve, retryAfterSeconds * 1_000);
-          });
-        }
-      }
-
-      throw new AppError(429, "TOMTOM_RATE_LIMITED", "TomTom rate limited the request.");
-    }
-
-    async function repairLeg(nodes, legDepartureTime, failedLeg = null) {
-      const legChunk = { nodes, startIndex: 0 };
-      const referencePayload = createTomTomPayload(
-        legChunk,
-        geometry,
-        legDepartureTime
-      );
-      let lastReconstruction;
-      let lastError;
-      const maneuver = unmappedManeuver(nodes, geometry, failedLeg);
-
-      function acceptManeuverEstimate() {
-        const leg = estimatedManeuverLeg(maneuver, legDepartureTime, failedLeg);
-
-        estimatedManeuvers.push({
-          publicSegmentIndex: nodes[1].publicSegmentIndex,
-          ...maneuver,
-          durationSeconds: leg.drivingDurationSeconds
+  async function calculateAdaptiveRoute(nodes, geometry, options, learned) {
+    let plan = { distances: learned?.distances ?? [],
+      alternativeRanges: learned?.alternativeRanges ?? [], waypointOnly: learned?.waypointOnly ?? false };
+    const attempts = [];
+    const originalControls = createTomTomControls(nodes, geometry, options.dwellTimeSeconds);
+    const referencePath = createTomTomPayload({ nodes: originalControls }, geometry, options.departureTime).legs[0].path;
+    const stopDistances = nodes.map(node => node.distanceAlongRoute - nodes[0].distanceAlongRoute);
+    let best;
+    let reconstructionError;
+    for (let attempt = 0; attempt < MAX_ROUTING_ATTEMPTS; attempt += 1) {
+      const { distances } = plan;
+      const controls = createTomTomControls(nodes, geometry, options.dwellTimeSeconds, distances);
+      const payload = createTomTomPayload({ nodes: controls }, geometry, options.departureTime, plan);
+      if (attempt === 0 && learned?.paths?.length === payload.legs.length) {
+        payload.legs.forEach((leg, index) => {
+          if (leg.path && learned.paths[index]) leg.path = structuredClone(learned.paths[index]);
         });
-
-        return [{
-          ...leg,
-          publicSegmentIndex: nodes[1].publicSegmentIndex
-        }];
       }
-
-      if (maneuver && maneuver.length <= MAX_UNMAPPED_MANEUVER_METERS) {
-        return acceptManeuverEstimate();
-      }
-
-      for (const laneOffsetMeters of RECONSTRUCTION_LANE_OFFSETS_METERS.slice(1)) {
-        const payload = createTomTomPayload(
-          legChunk,
-          geometry,
-          legDepartureTime,
-          laneOffsetMeters
-        );
-
-        try {
-          const data = await callTomTom(payload);
-          const [leg] = readTomTomLegs(data, referencePayload.legs);
-
-          lastReconstruction = leg.reconstruction;
-
-          if (!leg.reconstruction.valid) {
-            continue;
-          }
-
-          repairs.push({
-            publicSegmentIndex: nodes[1].publicSegmentIndex,
-            startDistanceAlongRoute: nodes[0].distanceAlongRoute,
-            endDistanceAlongRoute: nodes[1].distanceAlongRoute,
-            laneOffsetMeters
-          });
-
-          return [{
-            ...leg,
-            publicSegmentIndex: nodes[1].publicSegmentIndex
-          }];
-        } catch (error) {
-          if (error?.code !== "IETT_ROUTE_RECONSTRUCTION_FAILED") {
-            throw error;
-          }
-
-          lastError = error;
-        }
-      }
-
-      if (maneuver) {
-        return acceptManeuverEstimate();
-      }
-
-      const legLength = nodes[1].distanceAlongRoute - nodes[0].distanceAlongRoute;
-
-      if (legLength > MIN_REPAIR_SPLIT_METERS) {
-        const middleDistance = nodes[0].distanceAlongRoute + legLength / 2;
-        const middlePoint = pointAlongRoute(geometry, middleDistance);
-        const middleNode = {
-          type: "route-anchor",
-          lat: middlePoint.lat,
-          lng: middlePoint.lng,
-          providerCoordinate: { lat: middlePoint.lat, lng: middlePoint.lng },
-          distanceAlongRoute: middlePoint.distanceAlongRoute,
-          publicSegmentIndex: nodes[1].publicSegmentIndex,
-          pauseDurationInSeconds: 0
-        };
-
-        subdivisions.push({
-          publicSegmentIndex: nodes[1].publicSegmentIndex,
-          startDistanceAlongRoute: nodes[0].distanceAlongRoute,
-          endDistanceAlongRoute: nodes[1].distanceAlongRoute,
-          splitDistanceAlongRoute: middlePoint.distanceAlongRoute
-        });
-
-        const firstLegs = await calculateRange({
-          startIndex: 0,
-          nodes: [nodes[0], middleNode]
-        }, legDepartureTime);
-        const secondDepartureTime = addSeconds(
-          firstLegs.at(-1).arrivalTimestamp,
-          middleNode.pauseDurationInSeconds
-        );
-        const secondLegs = await calculateRange({
-          startIndex: 0,
-          nodes: [middleNode, nodes[1]]
-        }, secondDepartureTime);
-
-        return [...firstLegs, ...secondLegs];
-      }
-
-      throw new AppError(
-        502,
-        "IETT_ROUTE_RECONSTRUCTION_FAILED",
-        "TomTom could not reconstruct the IETT geometry accurately.",
-        {
-          attemptedLaneOffsetsMeters: RECONSTRUCTION_LANE_OFFSETS_METERS,
-          publicSegmentIndex: nodes[1].publicSegmentIndex,
-          startDistanceAlongRoute: nodes[0].distanceAlongRoute,
-          endDistanceAlongRoute: nodes[1].distanceAlongRoute,
-          ...(lastReconstruction ? { lastReconstruction } : {}),
-          ...(lastError?.code ? { lastErrorCode: lastError.code } : {})
-        }
-      );
-    }
-
-    async function calculateRange(range, rangeDepartureTime) {
-      const referencePayload = createTomTomPayload(
-        range,
-        geometry,
-        rangeDepartureTime
-      );
-      let legs;
-
+      const currentAttempt = { strategy: plan.waypointOnly ? "waypoints-only"
+        : plan.alternativeRanges.length ? "local-waypoints" : "reconstruction",
+        learned: attempt === 0 && Boolean(learned), waypointCount: distances.length,
+        distances: [...distances], httpRequestCount: 0 };
+      attempts.push(currentAttempt);
+      let response, legs;
       try {
-        const data = await callTomTom(referencePayload);
-        legs = readTomTomLegs(data, referencePayload.legs).map((leg, index) => ({
-          ...leg,
-          publicSegmentIndex: range.nodes[index + 1].publicSegmentIndex
-        }));
+        response = await tomTomClient.calculateRoute(payload);
+        currentAttempt.httpRequestCount = response[TOMTOM_HTTP_ATTEMPTS] ?? 1;
+        legs = readTomTomLegs(response, payload.legs);
+        reconstructionError = undefined;
       } catch (error) {
-        if (error?.code !== "IETT_ROUTE_RECONSTRUCTION_FAILED") {
-          throw error;
+        currentAttempt.httpRequestCount = error[TOMTOM_HTTP_ATTEMPTS] ?? (currentAttempt.httpRequestCount || 1);
+        // Transport retries and 429 cooldowns belong exclusively to TomTomClient.
+        if (error?.code !== "IETT_ROUTE_RECONSTRUCTION_FAILED") throw error;
+        reconstructionError = error;
+      }
+      if (legs) {
+        const returnedPath = { type: "LineString", coordinates: legs.flatMap((leg, index) =>
+          index ? leg.path.coordinates.slice(1) : leg.path.coordinates) };
+        let geometryMatch = matcher.evaluate(referencePath, returnedPath,
+          legs.reduce((total, leg) => total + leg.distanceMeters, 0), stopDistances);
+        const disconnected = legs.some((leg, index) => index > 0 && haversineDistance(
+          { lng: legs[index - 1].path.coordinates.at(-1)[0], lat: legs[index - 1].path.coordinates.at(-1)[1] },
+          { lng: leg.path.coordinates[0][0], lat: leg.path.coordinates[0][1] }
+        ) > 5);
+        if (disconnected) {
+          geometryMatch.valid = false;
+          geometryMatch.quality = "rejected";
+          geometryMatch.reasons.push("DISCONNECTED_PROVIDER_LEGS");
+        }
+        geometryMatch = evaluateTomTomLocalAlternative({ matcher, match: geometryMatch,
+          nodes, geometry, returnedPath, plan });
+        const { stopProgressMeters, ...publicGeometryMatch } = geometryMatch;
+        geometryMatch = publicGeometryMatch;
+        const estimatedManeuvers = [];
+        if (!geometryMatch.valid && legs.length === 1 && nodes.length === 2) {
+          legs[0].reconstruction = geometryMatch;
+          const maneuver = unmappedManeuver(nodes, geometry, legs[0]);
+          if (maneuver && maneuver.length <= MAX_UNMAPPED_MANEUVER_METERS) {
+            estimatedManeuvers.push({ providerLegIndex: 0, ...maneuver });
+            legs[0] = { ...estimatedManeuverLeg(maneuver, legs[0].departureTime, legs[0]), path: referencePath };
+          }
+        }
+        const candidate = { legs, geometryMatch, controls, distances: [...distances],
+          plan, stopProgressMeters, response, estimatedManeuvers };
+        if (!best || compareGeometryMatches(geometryMatch, best.geometryMatch) < 0) best = candidate;
+        if (geometryMatch.valid || estimatedManeuvers.length) {
+          best = candidate;
+          break;
         }
 
-        if (range.nodes.length === 2) {
-          return repairLeg(range.nodes, rangeDepartureTime);
-        }
-
-        const middleIndex = Math.floor((range.nodes.length - 1) / 2);
-        const firstRange = {
-          startIndex: range.startIndex,
-          nodes: range.nodes.slice(0, middleIndex + 1)
-        };
-        const secondRange = {
-          startIndex: range.startIndex + middleIndex,
-          nodes: range.nodes.slice(middleIndex)
-        };
-        const firstLegs = await calculateRange(firstRange, rangeDepartureTime);
-        const secondDepartureTime = addSeconds(
-          firstLegs.at(-1).arrivalTimestamp,
-          range.nodes[middleIndex].pauseDurationInSeconds
-        );
-        const secondLegs = await calculateRange(secondRange, secondDepartureTime);
-
-        return [...firstLegs, ...secondLegs];
       }
-
-      const invalidIndex = legs.findIndex(leg => !leg.reconstruction.valid);
-
-      if (invalidIndex === -1) {
-        return legs;
+      if (attempt + 1 === MAX_ROUTING_ATTEMPTS) break;
+      if (attempt === 0 && learned) {
+        // A changed road network or closure may invalidate a previously matched
+        // path. Retry the original trace without stale controls, leaving the
+        // final attempt available for a local repair or waypoint-only fallback.
+        plan = { distances: [], alternativeRanges: [], waypointOnly: false };
+        continue;
       }
-
-      const validPrefix = legs.slice(0, invalidIndex);
-      const invalidDepartureTime = invalidIndex === 0
-        ? legs[invalidIndex].departureTime
-        : addSeconds(
-            validPrefix.at(-1).arrivalTimestamp,
-            range.nodes[invalidIndex].pauseDurationInSeconds
-          );
-      const repairedLegs = await repairLeg(
-        range.nodes.slice(invalidIndex, invalidIndex + 2),
-        invalidDepartureTime,
-        legs[invalidIndex]
-      );
-      const repairedLastLeg = repairedLegs.at(-1);
-      const accepted = [...validPrefix, ...repairedLegs];
-
-      if (invalidIndex === range.nodes.length - 2) {
-        return accepted;
-      }
-
-      const suffixStartIndex = invalidIndex + 1;
-      const suffix = {
-        startIndex: range.startIndex + suffixStartIndex,
-        nodes: range.nodes.slice(suffixStartIndex)
-      };
-      const suffixDepartureTime = addSeconds(
-        repairedLastLeg.arrivalTimestamp,
-        range.nodes[suffixStartIndex].pauseDurationInSeconds
-      );
-      const suffixLegs = await calculateRange(suffix, suffixDepartureTime);
-
-      return [...accepted, ...suffixLegs];
+      const next = best ? localTomTomPlan(nodes, geometry, best.geometryMatch, plan, attempt > 0)
+        : plan.waypointOnly ? localTomTomPlan(nodes, geometry, undefined, plan, true)
+          : waypointOnlyTomTomPlan(nodes, geometry);
+      if (JSON.stringify(next) === JSON.stringify(plan)) break;
+      plan = next;
     }
+    if (best?.geometryMatch.valid || best?.estimatedManeuvers.length) {
+      // Public stop metrics use the same whole-section decision, without
+      // applying fresh thresholds to artificial provider-leg boundaries.
+      best.legs.forEach(leg => { if (!leg.reconstruction.estimated) leg.reconstruction = {
+        ...best.geometryMatch,
+        referenceLengthMeters: leg.distanceMeters,
+        returnedLengthMeters: leg.distanceMeters
+      }; });
+      return { ...best, attempts,
+        legs: distributeTomTomLegs(best.legs, best.controls, nodes,
+          best.estimatedManeuvers.length ? null : best.response.routes[0].progressPoints, best.stopProgressMeters),
+        providerPaths: best.legs.map(leg => leg.path) };
+    }
+    throw new AppError(502, "IETT_ROUTE_RECONSTRUCTION_FAILED",
+      "TomTom could not match the IETT route within the configured geometry limits.", {
+        upstreamRequestCount: attempts.reduce((sum, item) => sum + item.httpRequestCount, 0),
+        maximumUpstreamRequestCount: MAX_ROUTING_ATTEMPTS * 2,
+        geometryAttemptCount: attempts.length, maximumGeometryAttemptCount: MAX_ROUTING_ATTEMPTS,
+        attemptedWaypointCounts: attempts.map(attempt => attempt.waypointCount),
+        ...(best ? { lastReconstruction: best.geometryMatch } : {}),
+        ...(reconstructionError ? { lastErrorCode: reconstructionError.code } : {})
+      });
+  }
 
-    const legs = await calculateRange(chunk, departureTime);
-
-    return { legs, attemptCount, repairs, subdivisions, estimatedManeuvers };
+  async function calculateWithSharedShape(routeCode, prepared, nodes, options) {
+    const key = JSON.stringify([routeCode, prepared.fingerprint,
+      nodes.map(node => [node.stationIndex, node.distanceAlongRoute, node.providerCoordinate])]);
+    function learnedShape() {
+      const entry = shapes.get(key);
+      if (entry && entry.expiresAt > Number(clock())) return entry;
+      shapes.delete(key);
+      return undefined;
+    }
+    if (!learnedShape() && preparingShapes.has(key)) {
+      // A failed departure never poisons another departure's traffic estimate.
+      await preparingShapes.get(key).catch(() => {});
+    }
+    const learned = learnedShape();
+    const generation = cacheGeneration;
+    const calculation = calculateAdaptiveRoute(nodes, prepared.geometry, options, learned).then(result => {
+      if (!result.estimatedManeuvers.length && generation === cacheGeneration) {
+        if (shapes.size >= shapeCacheMaxEntries) shapes.delete(shapes.keys().next().value);
+        shapes.set(key, { paths: result.providerPaths.map((path, index) =>
+          isTomTomAlternativeLeg(result.plan, result.controls[index].distanceAlongRoute,
+            result.controls[index + 1].distanceAlongRoute) ? null : structuredClone(path)),
+          distances: [...result.distances], alternativeRanges: structuredClone(result.plan.alternativeRanges),
+          waypointOnly: result.plan.waypointOnly,
+          expiresAt: learned?.expiresAt ?? Number(clock()) + shapeCacheTtlMs });
+      }
+      return result;
+    }).catch(error => {
+      if (error?.code === "IETT_ROUTE_RECONSTRUCTION_FAILED" && shapes.get(key) === learned) shapes.delete(key);
+      throw error;
+    });
+    if (!learned) {
+      preparingShapes.set(key, calculation);
+      const forget = () => { if (preparingShapes.get(key) === calculation) preparingShapes.delete(key); };
+      calculation.then(forget, forget);
+    }
+    return calculation;
   }
 
   async function calculate(routeCode, options) {
     const routeData = await iettClient.getRoutePin(routeCode);
     const record = routeRecord(routeData, routeCode);
-    const geometry = buildRouteGeometry(record.line);
-    const matchedStops = addStationSequenceNumbers(
-      matchStopsToRoute(record.stationPlaces, geometry)
-    );
-    const nodes = selectRouteNodes(matchedStops, geometry, options);
-    const { routingNodes, anchorCount } = buildRoutingNodes(
-      nodes,
-      geometry,
-      options.dwellTimeSeconds
-    );
-    const chunks = chunkRouteNodes(routingNodes);
+    const prepared = prepareRoute(record);
+    const { geometry, matchedStops } = prepared;
+    const { nodes } = prepareSection(prepared, options);
+    const calculated = await calculateWithSharedShape(routeCode, prepared, nodes, options);
     const segmentAccumulators = createPublicSegments(nodes, options.dwellTimeSeconds);
-    const reconstructionRepairs = [];
-    const reconstructionSubdivisions = [];
-    const estimatedManeuvers = [];
-    let upstreamRequestCount = 0;
-    let departureTime = options.departureTime;
-
-    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-      const chunk = chunks[chunkIndex];
-      const isLastChunk = chunkIndex === chunks.length - 1;
-      const calculatedChunk = await calculateChunk(
-        chunk,
-        geometry,
-        departureTime
-      );
-      const { legs } = calculatedChunk;
-
-      upstreamRequestCount += calculatedChunk.attemptCount;
-      reconstructionRepairs.push(...calculatedChunk.repairs);
-      reconstructionSubdivisions.push(...calculatedChunk.subdivisions);
-      estimatedManeuvers.push(...calculatedChunk.estimatedManeuvers);
-
-      for (let legIndex = 0; legIndex < legs.length; legIndex += 1) {
-        const leg = legs[legIndex];
-        const segment = segmentAccumulators[leg.publicSegmentIndex];
-
-        addProviderLeg(segment, leg);
-      }
-
-      if (!isLastChunk) {
-        departureTime = addSeconds(
-          legs.at(-1).arrivalTimestamp,
-          chunk.nodes.at(-1).pauseDurationInSeconds
-        );
-      }
+    for (const leg of calculated.legs) addProviderLeg(segmentAccumulators[leg.publicSegmentIndex], leg);
+    // Bus stops remain in the public timeline, without becoming forced routing
+    // locations. Count every actual intermediate stop's dwell exactly once.
+    let timestamp = Date.parse(calculated.legs[0].departureTime);
+    for (const segment of segmentAccumulators) {
+      segment.departureTime = addSeconds(timestamp, 0);
+      timestamp += segment.drivingDurationSeconds * 1_000;
+      segment.arrivalTime = addSeconds(timestamp, 0);
+      timestamp += segment.dwellAfterArrivalSeconds * 1_000;
     }
-
+    const estimatedManeuvers = calculated.estimatedManeuvers;
     const segmentsWithReconstruction = finalizePublicSegments(segmentAccumulators);
-    const segments = segmentsWithReconstruction.map(({ reconstruction, ...segment }) => segment);
+    const segments = roundSegmentDistances(segmentsWithReconstruction.map(({ reconstruction, ...segment }) => segment));
 
-    const origin = nodes[0];
-    const destination = nodes.at(-1);
     const result = {
-      routeCode,
-      provider: "tomtom-orbis",
-      trafficMode: "live",
-      generatedAt: new Date().toISOString(),
-      origin: publicNode(origin),
-      destination: publicNode(destination),
-      startDistanceAlongRoute: origin.distanceAlongRoute,
-      endDistanceAlongRoute: destination.distanceAlongRoute,
-      iettGeometryLengthMeters: destination.distanceAlongRoute - origin.distanceAlongRoute,
+      ...resultEnvelope({ routeCode, provider: "tomtom-orbis", options, nodes, clock }),
       total: totalFromSegments(segments),
+      geometryMatch: calculated.geometryMatch,
+      stopTimingSource: segments.every(segment => segment.stopTimingSource === segments[0].stopTimingSource)
+        ? segments[0].stopTimingSource : "mixed-interpolation",
       segments
     };
+    result.total.distanceMeters = Math.round(result.total.distanceMeters * 10) / 10;
 
     if (estimatedManeuvers.length) {
+      result.geometryMatch = { ...result.geometryMatch, quality: "estimated", providerGeometryValid: false };
       result.routingQuality = "validated-with-iett-maneuver-estimate";
       result.warnings = [{
         code: "UNMAPPED_IETT_MANEUVER_ESTIMATED",
         message: "TomTom could not represent a bus-only IETT section, so that section was estimated from the IETT geometry.",
         count: estimatedManeuvers.length
       }];
+    } else if (calculated.geometryMatch.quality === "approximate") {
+      result.routingQuality = "tomtom-geometry-approximate";
+      result.warnings = [calculated.geometryMatch.acceptanceBasis === "stop-preserving-local-alternative"
+        ? { code: "IETT_LOCAL_ROUTE_APPROXIMATION",
+          message: "Travel time uses bounded local TomTom alternatives that preserve every stop in order. See geometryMatch.alternatives." }
+        : { code: "IETT_GEOMETRY_APPROXIMATION",
+          message: "Travel time uses a nearby TomTom path with bounded deviations from the IETT route. See geometryMatch." }];
     } else {
       result.routingQuality = "tomtom-geometry-validated";
     }
 
+    if (segments.some(segment => segment.stopTimingSource === "distance-interpolation")) {
+      result.warnings = [...(result.warnings ?? []), {
+        code: "STOP_TIMES_DISTANCE_INTERPOLATED",
+        message: "TomTom progress points were unavailable; stop-level driving times were allocated by distance. The provider's total driving duration is preserved."
+      }];
+    }
+
+    const fullGeometryMatch = result.geometryMatch;
+    result.geometryMatch = compactGeometryMatch(fullGeometryMatch);
     if (options.debug) {
       result.debug = {
-        chunkCount: chunks.length,
-        upstreamRequestCount,
-        reconstructionRepairs,
-        reconstructionSubdivisions,
+        geometryMatch: fullGeometryMatch,
+        chunkCount: 1,
+        upstreamRequestCount: calculated.attempts.reduce((sum, item) => sum + item.httpRequestCount, 0),
+        maximumUpstreamRequestCount: MAX_ROUTING_ATTEMPTS * 2,
+        geometryAttemptCount: calculated.attempts.length,
+        maximumGeometryAttemptCount: MAX_ROUTING_ATTEMPTS,
+        waypointStrategy: "hybrid-local-adaptive",
+        waypointAttempts: calculated.attempts,
+        reconstructionRepairs: calculated.attempts.slice(1),
+        reconstructionSubdivisions: [],
         estimatedManeuvers,
-        routingAnchorCount: anchorCount,
-        routingNodeCount: routingNodes.length,
-        maximumReconstructionLegMeters: MAX_RECONSTRUCTION_LEG_METERS,
+        routingAnchorCount: calculated.controls.length - 2,
+        routingNodeCount: calculated.controls.length,
+        omittedStopWaypointCount: nodes.slice(1, -1).filter(node => !calculated.controls
+          .some(control => Math.abs(control.distanceAlongRoute - node.distanceAlongRoute) < .01)).length,
+        controlPoints: calculated.controls.slice(1, -1).map(node => ({
+          lat: node.providerCoordinate.lat, lng: node.providerCoordinate.lng,
+          distanceAlongRoute: node.distanceAlongRoute
+        })),
         reconstruction: segmentsWithReconstruction.map(segment => ({
           segmentIndex: segment.index,
           from: segment.from.type === "station" ? segment.from.name : segment.from.type,
@@ -1306,7 +691,7 @@ export function createIettTravelTimeService({
           stationIndex: stop.stationIndex,
           distanceAlongRoute: stop.distanceAlongRoute,
           distanceToRoute: stop.distanceToRoute,
-          providerCoordinate: stop.providerCoordinate,
+          providerCoordinate: { ...stop.providerCoordinate },
           projectedToRoute: stop.projectedToRoute
         }))
       };
@@ -1319,7 +704,7 @@ export function createIettTravelTimeService({
     const options = validateTravelTimeOptions(optionsInput);
     const key = cacheKey(routeCode, options);
     const existing = cache.get(key);
-    const now = Date.now();
+    const now = Number(clock());
 
     if (existing && existing.expiresAt > now) {
       return existing.promise;
@@ -1339,7 +724,7 @@ export function createIettTravelTimeService({
     promise.then(
       () => {
         if (cache.get(key) === entry) {
-          entry.expiresAt = Date.now() + cacheTtlMs;
+          entry.expiresAt = Number(clock()) + cacheTtlMs;
         }
       },
       () => {}
@@ -1357,6 +742,11 @@ export function createIettTravelTimeService({
     calculateIettRouteTimes,
     clearCache() {
       cache.clear();
+      matcher.clear();
+      shapes.clear();
+      preparingShapes.clear();
+      cacheGeneration += 1;
+      preparation.clear();
     }
   };
 }

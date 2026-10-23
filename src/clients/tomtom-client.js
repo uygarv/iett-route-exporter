@@ -1,4 +1,5 @@
 import { AppError } from "../shared/errors.js";
+import { sharedTomTomScheduler } from "./tomtom-scheduler.js";
 
 const DEFAULT_BASE_URL = "https://api.tomtom.com/maps/orbis/routing/routes/calculate";
 
@@ -7,7 +8,8 @@ export class TomTomClient {
     fetchImpl = globalThis.fetch,
     apiKey = process.env.TOMTOM_API_KEY,
     timeoutMs = 12_000,
-    baseUrl = DEFAULT_BASE_URL
+    baseUrl = DEFAULT_BASE_URL,
+    scheduler
   } = {}) {
     if (typeof fetchImpl !== "function") {
       throw new TypeError("A fetch implementation is required.");
@@ -17,6 +19,7 @@ export class TomTomClient {
     this.apiKey = apiKey;
     this.timeoutMs = timeoutMs;
     this.baseUrl = baseUrl;
+    this.scheduler = scheduler;
   }
 
   async calculateRoute(payload) {
@@ -28,6 +31,13 @@ export class TomTomClient {
       );
     }
 
+    const body = JSON.stringify(payload, (_key, value) => value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
+    const scheduler = this.scheduler ?? sharedTomTomScheduler(this.apiKey.trim());
+    return scheduler.execute(JSON.stringify([this.apiKey.trim(), this.baseUrl, body]), () => this.#request(body));
+  }
+
+  async #request(body) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     let response;
@@ -42,12 +52,13 @@ export class TomTomClient {
           accept: "application/json",
           "content-type": "application/json",
           "tomtom-api-key": this.apiKey.trim(),
-          attributes: "routes(summary,legs(summary,path))"
+          attributes: "routes(summary,legs(summary,path),progressPoints)"
         },
-        body: JSON.stringify(payload),
+        body,
         signal: controller.signal
       });
     } catch (error) {
+      clearTimeout(timeout);
       const timedOut = error?.name === "AbortError";
 
       throw new AppError(
@@ -57,19 +68,12 @@ export class TomTomClient {
           ? "The TomTom routing request timed out."
           : "The TomTom routing request failed."
       );
-    } finally {
+    }
+
+    if ([429, 401, 403].includes(response.status)) {
       clearTimeout(timeout);
+      response.body?.cancel().catch(() => {});
     }
-
-    let data;
-    let invalidJson = false;
-
-    try {
-      data = await response.json();
-    } catch {
-      invalidJson = true;
-    }
-
     if (response.status === 429) {
       const retryAfter = response.headers.get("retry-after");
 
@@ -87,6 +91,21 @@ export class TomTomClient {
         "TOMTOM_AUTH_FAILED",
         "TomTom rejected the configured API key."
       );
+    }
+
+
+    let data;
+    let invalidJson = false;
+
+    try {
+      data = await response.json();
+    } catch {
+      if (controller.signal.aborted) {
+        throw new AppError(502, "TOMTOM_TIMEOUT", "The TomTom routing response timed out.");
+      }
+      invalidJson = true;
+    } finally {
+      clearTimeout(timeout);
     }
 
     if (invalidJson) {

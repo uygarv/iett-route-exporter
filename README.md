@@ -340,24 +340,166 @@ curl -X POST http://localhost:3000/api/iett/routes/256_D_D0/travel-times \
     "startStation":"GÜMÜŞSUYU PERON",
     "endStation":"KÖPRÜLÜ KAVŞAK",
     "departureTime":"now",
-    "dwellTimeSeconds":20,
+    "dwellTimeSeconds":15,
     "debug":false
   }'
 ```
 
 - `departureTime` accepts `"now"` or an ISO 8601 date time. When the value has no time zone offset, TomTom interprets it in the origin's local time zone.
-- `dwellTimeSeconds` defaults to `20` and accepts integers from `0` through `600`.
+- `dwellTimeSeconds` defaults to `15` and accepts integers from `0` through `600`.
 - The existing `currentLocation`, `startStation`, and `endStation` rules also apply.
 
-The service sends each selected IETT geometry interval to TomTom and validates the
-returned path in both directions. Long stop gaps receive internal routing anchors,
-and a locally misaligned road can be retried with a small lane offset. A response is
-not accepted just because TomTom returned a route.
+With TomTom, the service starts with origin and destination only: bus stops are not forced
+waypoints, and long stop gaps do not receive arbitrary 1 km anchors. The complete
+selected IETT geometry is retained in `legs[].path`, which TomTom uses for route
+reconstruction. This separates supporting geometry from mandatory routing locations.
+See [TomTom Orbis v3 route reconstruction](https://docs.tomtom.com/routing-api/documentation/tomtom-orbis-maps/v3/calculate-route).
+
+Geometry validation operates on the **whole selected section**, not on artificial
+waypoint legs. It uses distance-weighted measurements in both directions and an
+ordered, banded Frechet alignment to detect reversed travel, missing loops and
+shortcuts that nearest-point measurements would conceal. Prepared spatial indexes
+and successful geometry comparisons are reused.
+
+| Geometry limit | Validated | Approximate |
+|---|---:|---:|
+| Origin/destination offset | 40 m | 40 m |
+| P95 deviation, each direction | 35 m | 50 m |
+| Maximum deviation, including ordered alignment | 80 m | 150 m |
+
+Both classes must also satisfy: at most 8% outside the 35 m corridor, at most
+400 m of continuous deviation, and length difference at most `max(75 m, 10%)`.
+Direction, local distance progression and stop order are checked as well.
+Approximate results retain the actual TomTom duration and report:
+
+```json
+{
+  "routingQuality": "tomtom-geometry-approximate",
+  "geometryMatch": {
+    "valid": true,
+    "quality": "approximate",
+    "orderedMaximumDeviationMeters": 103.8
+  },
+  "warnings": [{ "code": "IETT_GEOMETRY_APPROXIMATION" }]
+}
+```
+
+Normal responses include a compact `geometryMatch` summary with acceptance,
+quality, maximum ordered deviation, and any local alternatives. Set `debug: true`
+to get complete endpoint/length metrics, deviations, order mismatches and original
+rejection reasons under `debug.geometryMatch`.
+
+If the initial result is unacceptable, the service expands each deviation to
+adjacent bus-stop boundaries and adds those stops as ordered waypoints. Only
+affected legs omit `path`; the rest retain supporting geometry. A final repair
+can add up to six controls around remaining turns. Controls remain at least 60 m
+apart, with at most 150 waypoints and **three geometry attempts**. A worse repair
+never replaces the closest candidate in error diagnostics.
+
+If TomTom cannot reconstruct the initial trace at all, the next request uses
+only waypoints selected by the existing map-export algorithm (at most 18),
+without any `path` fields. Remaining deviations receive the final targeted
+repair. There are no uniform dense anchors or requests for every stop pair.
+
+Local alternatives have a separate acceptance contract; the standard geometry
+limits above remain unchanged. Every stop must match in order within 50 m, and
+provider legs must connect. Endpoint offsets must stay within 40 m, total length
+within 10%, P95 within 50 m in both directions, ordered maximum deviation within
+250 m, distance outside the 35 m corridor within 8% in each direction, and
+continuous deviation within 800 m. Each alternative stop interval must be at
+most 1,000 m, with returned length between 50% and 150% of the reference and an
+absolute difference at most 500 m. Contiguous blocks outside the declared
+alternative intervals must pass the original geometry validation.
+
+Accepted local alternatives return `routingQuality: "tomtom-geometry-approximate"`
+with warning `IETT_LOCAL_ROUTE_APPROXIMATION`. `geometryMatch.valid: true` means
+the local acceptance contract passed, not that the original geometry matched.
+`geometryMatch` includes:
+
+- `acceptanceBasis: "stop-preserving-local-alternative"`
+- `alternatives` with station indexes and measured reference/returned lengths
+- `maximumStopOffsetMeters` and `orderedMaximumDeviationMeters`
+
+The full `debug.geometryMatch` additionally retains `referenceGeometryValid: false`,
+`referenceGeometryReasons`, reference route ranges and all whole-route metrics.
+Warnings reference `geometryMatch.alternatives` without duplicating those intervals.
+Public distances are rounded to one decimal place, with cumulative rounding keeping
+segment distance totals consistent with the route total.
+
+Unresolved mismatches still return `IETT_ROUTE_RECONSTRUCTION_FAILED`. Local
+alternatives use actual TomTom durations; no new speed-based duration is invented.
+
+The recorded 11T case is a bounded approximation and now finishes in one geometry
+request. The recorded full and partial 256 cases finish in two requests. The
+local waypoint alternative preserves all stops, while the approximately 841 m
+FİNANS MERKEZİ–BEGONYA SOKAK reference interval becomes about 504 m in TomTom.
+That difference is explicitly reported as a local approximation.
+
+Successful matched paths and controls are cached for 24 hours, bounded to 128
+sections. Concurrent departures share preparation; the first preparation request
+also supplies that departure's duration. Later departures each get a separate
+traffic query, using learned paths for matched legs and retaining waypoint-only
+routing for alternative legs. Cached controls and leg strategies are validated
+against the original IETT section on every departure. Cache keys include the source fingerprint, route/direction and selected
+endpoints. IETT records refresh 24 hours after completion; changed source data
+invalidates preparation. Exact departure-time results still expire after 60 seconds;
+errors and maneuver estimates are not stored as learned road paths.
+
+`createIettService({ geometryPolicy, shapeCacheTtlMs, shapeCacheMaxEntries, clock })`
+configures matching and caching. `geometryPolicy` overrides the exported
+`DEFAULT_GEOMETRY_POLICY`; for example `{ approximateMaxMeters: 120 }` tightens
+standard geometry acceptance and validation outside local alternatives without
+changing the endpoint request schema. Local alternatives use the separate fixed
+bounds documented above.
+
+### Shared TomTom request limits
+
+Every default `TomTomClient` in this process shares a scheduler per API key,
+including direct IETT calls, repairs and retries.
+Default settings are `TOMTOM_REQUESTS_PER_SECOND=4` (at least 250 ms between starts)
+and `TOMTOM_MAX_CONCURRENCY=4`. This leaves headroom under TomTom's documented default [5 Routing QPS](https://docs.tomtom.com/platform/documentation/api-best-practices/qps-limits).
+
+Identical pending HTTP payloads are combined before queueing. HTTP 429 updates a
+shared cooldown using numeric or HTTP-date `Retry-After`, halves the request rate
+and permits recovery after 60 seconds without another 429. Timeouts, network errors,
+HTTP 5xx and 429 can be retried **once per HTTP operation**, always through the same
+queue. Authentication and reconstruction errors do not receive transport retries.
+Cooldowns longer than 10 seconds fail promptly with an explicit rate-limit cause.
+Thus a BUS calculation has at most three geometry attempts and up to six HTTP
+attempts if each operation requires its single transport retry. A lingering 429
+is never reclassified as a geometry failure.
+
+The default scope is one Node process using this API key. Multiple processes must
+share external coordination if added later. For controlled tests or custom limits,
+inject one `createTomTomScheduler(...)` into all `TomTomClient({ scheduler })`
+instances. The scheduler accepts clock, timer and randomness dependencies.
+
+The response still contains one segment per adjacent bus stop. Driving times are
+interpolated from TomTom's route `progressPoints`, rather than forcing a separate
+route leg at every stop. Each segment and the root expose
+`stopTimingSource: "tomtom-progress-interpolation"`. These stop-level values are
+estimates; the provider leg's total driving time, traffic delay, and distance are
+preserved. Actual intermediate bus-stop waits are added exactly once to the public
+timeline, including stops that were omitted as waypoints. Within each sparse leg,
+stop pauses do not trigger additional traffic queries.
+
+If progress points are absent or invalid, allocation uses distance and reports
+`stopTimingSource: "distance-interpolation"` with a
+`STOP_TIMES_DISTANCE_INTERPOLATED` warning. This fallback does not invent a BUS
+driving duration; it distributes the duration actually returned by TomTom.
+
+With `debug: true`, `waypointStrategy`, `waypointAttempts`, `controlPoints`,
+`omittedStopWaypointCount`, `upstreamRequestCount`, and
+`maximumUpstreamRequestCount` explain the reduced routing constraints and cost.
+`geometryAttemptCount` and `maximumGeometryAttemptCount` distinguish geometry work
+from actual HTTP attempts, including transport retries. `waypointStrategy` is
+`hybrid-local-adaptive`; each attempt reports its `strategy` (`reconstruction`,
+`local-waypoints`, or `waypoints-only`), `learned` status, and waypoint/HTTP counts.
 
 Some IETT routes contain bus-only turns which do not exist in TomTom's car road
-graph. When a short maneuver, or a strongly turning section shorter than one
-kilometre, clearly becomes a large shortcut or detour, the service keeps the IETT
-geometry and estimates only that section. Such a response has:
+graph. When a clearly identified turn of at most 75 metres becomes a large detour,
+the service can keep the IETT geometry and estimate only that short maneuver.
+Such a response has:
 
 ```json
 {
@@ -380,7 +522,9 @@ of returning a misleading duration.
 {
   "routeCode": "256_D_D0",
   "provider": "tomtom-orbis",
-  "trafficMode": "live",
+  "requestedTrafficMode": "live",
+  "trafficTimeContext": "scheduled",
+  "trafficDataBasis": "historical",
   "routingQuality": "tomtom-geometry-validated",
   "generatedAt": "2026-10-04T09:00:00.000Z",
   "origin": {
@@ -403,12 +547,11 @@ of returning a misleading duration.
   "total": {
     "distanceMeters": 4920,
     "drivingDurationSeconds": 980,
-    "dwellDurationSeconds": 200,
-    "freeFlowDurationSeconds": 760,
-    "trafficDelaySeconds": 220,
-    "estimatedDurationSeconds": 1180,
+    "dwellDurationSeconds": 150,
+    "liveTrafficDelaySeconds": 220,
+    "estimatedDurationSeconds": 1130,
     "departureTime": "2026-10-04T09:00:00Z",
-    "arrivalTime": "2026-10-04T09:19:40Z"
+    "arrivalTime": "2026-10-04T09:18:50Z"
   },
   "segments": [
     {
@@ -429,16 +572,26 @@ of returning a misleading duration.
       },
       "distanceMeters": 430,
       "drivingDurationSeconds": 82,
-      "freeFlowDurationSeconds": 65,
-      "trafficDelaySeconds": 17,
-      "dwellAfterArrivalSeconds": 20,
-      "elapsedUntilNextDepartureSeconds": 102,
+      "liveTrafficDelaySeconds": 17,
+      "dwellAfterArrivalSeconds": 15,
+      "elapsedUntilNextDepartureSeconds": 97,
       "departureTime": "2026-10-04T09:00:00Z",
       "arrivalTime": "2026-10-04T09:01:22Z"
     }
   ]
 }
 ```
+
+`requestedTrafficMode` is the mode sent to TomTom, not a claim that future
+traffic is already known. Requests with `departureTime: "now"` use
+`trafficTimeContext: "immediate"` and `trafficDataBasis: "live"`. Requests for a
+scheduled time use `trafficTimeContext: "scheduled"` and
+`trafficDataBasis: "historical"`.
+
+`liveTrafficDelaySeconds` is the extra delay TomTom reports from real-time traffic
+information. A value of `0` does not mean that historical congestion was ignored.
+Orbis v3 does not expose a separate no-traffic duration, so the API intentionally
+does not return a derived `freeFlowDurationSeconds` value.
 
 ## Download a GPX track
 
@@ -520,7 +673,7 @@ if (selected) {
 
   const travelTimes = await calculateIettRouteTimes(selected.code, {
     departureTime: "now",
-    dwellTimeSeconds: 20
+    dwellTimeSeconds: 15
   });
 
   console.log(travelTimes.total);

@@ -3,7 +3,8 @@ import { AppError } from "../shared/errors.js";
 const DEFAULT_BASE_URL = "https://iett.istanbul/tr/RouteStation/";
 
 export class IettClient {
-  constructor({ fetchImpl = globalThis.fetch, timeoutMs = 10_000, baseUrl = DEFAULT_BASE_URL } = {}) {
+  constructor({ fetchImpl = globalThis.fetch, timeoutMs = 10_000, baseUrl = DEFAULT_BASE_URL,
+    cacheTtlMs = 86_400_000, clock = Date.now } = {}) {
     if (typeof fetchImpl !== "function") {
       throw new TypeError("A fetch implementation is required.");
     }
@@ -11,6 +12,8 @@ export class IettClient {
     this.fetchImpl = fetchImpl;
     this.timeoutMs = timeoutMs;
     this.baseUrl = baseUrl;
+    this.cacheTtlMs = cacheTtlMs;
+    this.clock = clock;
     this.allRoutesCache = new Map();
     this.routePinCache = new Map();
   }
@@ -33,16 +36,18 @@ export class IettClient {
   }
 
   #cached(cache, key, loader) {
-    if (cache.has(key)) {
-      return cache.get(key);
-    }
-
-    const pending = loader().catch(error => {
-      cache.delete(key);
+    const existing = cache.get(key);
+    if (existing && existing.expiresAt > Number(this.clock())) return existing.promise;
+    const entry = { expiresAt: Infinity };
+    const pending = loader().then(data => {
+      entry.expiresAt = Number(this.clock()) + this.cacheTtlMs;
+      return data;
+    }, error => {
+      if (cache.get(key) === entry) cache.delete(key);
       throw error;
     });
-
-    cache.set(key, pending);
+    entry.promise = pending;
+    cache.set(key, entry);
     return pending;
   }
 

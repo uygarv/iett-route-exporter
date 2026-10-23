@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TomTomClient } from "../src/clients/tomtom-client.js";
+const directScheduler = { execute: (_key, run) => run() };
 
 test("posts Orbis requests with the API key in a header", async () => {
   let received;
-  const client = new TomTomClient({
+  const client = new TomTomClient({ scheduler: directScheduler,
     apiKey: "secret-key",
     fetchImpl: async (url, options) => {
       received = { url, options };
@@ -21,21 +22,21 @@ test("posts Orbis requests with the API key in a header", async () => {
 
   assert.equal(received.options.method, "POST");
   assert.equal(received.options.headers["tomtom-api-key"], "secret-key");
-  assert.equal(received.options.headers.attributes, "routes(summary,legs(summary,path))");
+  assert.equal(received.options.headers.attributes, "routes(summary,legs(summary,path),progressPoints)");
   assert.deepEqual(JSON.parse(received.options.body), payload);
   assert.equal(received.url.searchParams.get("apiVersion"), "3");
   assert.equal(received.url.toString().includes("secret-key"), false);
 });
 
 test("requires configuration and maps TomTom quota and reconstruction errors", async () => {
-  const unconfigured = new TomTomClient({ apiKey: "" });
+  const unconfigured = new TomTomClient({ scheduler: directScheduler, apiKey: "" });
 
   await assert.rejects(
     unconfigured.calculateRoute({}),
     error => error.status === 503 && error.code === "ROUTING_PROVIDER_NOT_CONFIGURED"
   );
 
-  const limited = new TomTomClient({
+  const limited = new TomTomClient({ scheduler: directScheduler,
     apiKey: "key",
     fetchImpl: async () => new Response("not-json", {
       status: 429,
@@ -55,7 +56,7 @@ test("requires configuration and maps TomTom quota and reconstruction errors", a
     }
   );
 
-  const reconstructionFailure = new TomTomClient({
+  const reconstructionFailure = new TomTomClient({ scheduler: directScheduler,
     apiKey: "key",
     fetchImpl: async () => new Response(JSON.stringify({
       detailedError: {
@@ -75,7 +76,7 @@ test("requires configuration and maps TomTom quota and reconstruction errors", a
 });
 
 test("maps invalid JSON and request failures to upstream errors", async () => {
-  const invalidJson = new TomTomClient({
+  const invalidJson = new TomTomClient({ scheduler: directScheduler,
     apiKey: "key",
     fetchImpl: async () => new Response("not-json", { status: 200 })
   });
@@ -85,7 +86,7 @@ test("maps invalid JSON and request failures to upstream errors", async () => {
     error => error.status === 502 && error.code === "TOMTOM_INVALID_JSON"
   );
 
-  const failedRequest = new TomTomClient({
+  const failedRequest = new TomTomClient({ scheduler: directScheduler,
     apiKey: "key",
     fetchImpl: async () => {
       throw new Error("network down");
@@ -97,7 +98,7 @@ test("maps invalid JSON and request failures to upstream errors", async () => {
     error => error.status === 502 && error.code === "TOMTOM_REQUEST_FAILED"
   );
 
-  const timedOut = new TomTomClient({
+  const timedOut = new TomTomClient({ scheduler: directScheduler,
     apiKey: "key",
     fetchImpl: async () => {
       const error = new Error("aborted");
@@ -111,7 +112,7 @@ test("maps invalid JSON and request failures to upstream errors", async () => {
     error => error.status === 502 && error.code === "TOMTOM_TIMEOUT"
   );
 
-  const unauthorized = new TomTomClient({
+  const unauthorized = new TomTomClient({ scheduler: directScheduler,
     apiKey: "bad-key",
     fetchImpl: async () => new Response("{}", {
       status: 403,

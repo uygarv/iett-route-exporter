@@ -317,12 +317,17 @@ function publicVariant(variant) {
 export function createIettService({
   client = new IettClient(),
   tomTomClient = new TomTomClient(),
-  timingCacheTtlMs = 60_000
+  timingCacheTtlMs = 60_000,
+  geometryPolicy,
+  shapeCacheTtlMs = 86_400_000,
+  shapeCacheMaxEntries = 128,
+  clock = Date.now
 } = {}) {
   const travelTimeService = createIettTravelTimeService({
     iettClient: client,
     tomTomClient,
-    cacheTtlMs: timingCacheTtlMs
+    cacheTtlMs: timingCacheTtlMs,
+    geometryPolicy, shapeCacheTtlMs, shapeCacheMaxEntries, clock
   });
   const gpxService = createIettGpxService({ iettClient: client });
 
