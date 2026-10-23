@@ -12,10 +12,6 @@ This Express.js service exports IETT (Istanbul public bus) routes to map provide
   directions for the remaining route.
 - **Travel time estimates:** Calculate traffic-aware durations between stops,
   including configurable dwell time.
-- **Journey comparison:** Evaluate walking, metro, metrobus, bus, and school-ring
-  alternatives against an arrival deadline, with departure advice and step timelines.
-- **Single-journey calculation:** Calculate a chosen route forward from a selected
-  step and departure time, including traffic estimates and timetable waits.
 - **GPX export:** Download IETT route geometry as a GPX 1.1 track with bus stops
   as waypoints.
 - **JavaScript integration:** Call the route builders directly from another
