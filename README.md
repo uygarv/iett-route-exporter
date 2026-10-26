@@ -14,6 +14,8 @@ This Express.js service exports IETT (Istanbul public bus) routes to map provide
   including configurable dwell time.
 - **GPX export:** Download IETT route geometry as a GPX 1.1 track with bus stops
   as waypoints.
+- **Trip history:** Collect daily IETT archives into PostgreSQL with resumable
+  imports and scheduled updates.
 - **JavaScript integration:** Call the route builders directly from another
   Node.js project.
 
@@ -29,6 +31,7 @@ https://iett.istanbul/tr/RouteStation/
 ## Contents
 
 - [Run and configuration](#run-and-configuration)
+- [Historical trips](#historical-trips)
 - [Example](#example)
 - [Discover line directions and variants](#discover-line-directions-and-variants)
 - [Google Maps](#build-a-google-maps-url), [Apple Maps](#build-an-apple-maps-url),
@@ -66,6 +69,22 @@ Only the selected provider's key is required. Map URL endpoints do not require
 these keys. HERE defaults to 2 requests/second, 2 concurrent requests and a
 20-second timeout. `HERE_REQUESTS_PER_SECOND` and `HERE_MAX_CONCURRENCY` configure
 its independent request queue.
+
+## Historical trips
+
+Configure `DATABASE_URL`, then migrate and import the last 30 completed Istanbul
+calendar days:
+
+```bash
+npm run db:migrate
+npm run history:sync -- --days 30
+npm run history:worker
+```
+
+The worker runs separately from the API. It catches up on startup, imports new
+days at 04:00 Europe/Istanbul, refreshes the last three days, and retries failed
+or empty days hourly. Requests run sequentially with a default 1,000 ms delay
+after each response. Previously collected data is retained indefinitely.
 
 ## Example
 

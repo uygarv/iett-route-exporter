@@ -9,10 +9,17 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
+    "db:migrate": "node src/commands/history.js migrate",
+    "history:sync": "node src/commands/history.js sync",
+    "history:worker": "node src/history/worker.js",
+    "history:status": "node src/commands/history.js status",
     "example": "node examples/line-256.js"
   },
   "dependencies": {
     "dotenv": "^18.0.5",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "fast-xml-parser": "^5.11.2",
+    "node-cron": "^4.6.0",
+    "pg": "^8.23.1"
   }
 }
