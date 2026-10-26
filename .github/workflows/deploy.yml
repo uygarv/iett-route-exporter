@@ -4,9 +4,42 @@ on:
   push:
     branches:
       - main
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: iett_history_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d iett_history_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/iett_history_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
   deploy:
+    needs: test
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
@@ -32,6 +65,10 @@ jobs:
 
             npm ci
 
-            pm2 restart iett-route-exporter
+            if pm2 describe iett-history-worker >/dev/null 2>&1; then
+              pm2 stop iett-history-worker
+            fi
+            npm run db:migrate
+            pm2 startOrReload ecosystem.config.cjs --update-env
             pm2 save
           EOF
