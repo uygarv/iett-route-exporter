@@ -1,4 +1,4 @@
-import { buildRouteGeometry } from "./geometry.js";
+import { buildGeometryFromCoordinates } from "./geometry.js";
 import { matchStopsToRoute, sliceRouteGeometry } from "./timing.js";
 
 const rounded = value => Math.round(value * 10) / 10;
@@ -7,7 +7,7 @@ const line = (geometry, start, end) => ({ type: "LineString",
 
 // Local alternatives have their own acceptance contract. Keep the original
 // metrics and rejection reasons; do not relax the shared geometry policy.
-export function evaluateTomTomLocalAlternative({ matcher, match, nodes, geometry, returnedPath, plan }) {
+export function evaluateLocalRouteAlternative({ matcher, match, nodes, geometry, returnedPath, plan }) {
   if (match.valid || !plan.alternativeRanges.length) return match;
   const failures = [];
   const require = (condition, reason) => { if (!condition) failures.push(reason); };
@@ -28,7 +28,7 @@ export function evaluateTomTomLocalAlternative({ matcher, match, nodes, geometry
   const rejected = () => ({ ...match, localAlternativeRejectionReasons: [...new Set(failures)] });
   if (failures.length) return rejected();
 
-  const returned = buildRouteGeometry(`LINESTRING (${returnedPath.coordinates.map(point => point.join(" ")).join(",")})`);
+  const returned = buildGeometryFromCoordinates(returnedPath.coordinates);
   let stops;
   try {
     stops = matchStopsToRoute(nodes.map((node, index) => ({
@@ -84,7 +84,3 @@ export function evaluateTomTomLocalAlternative({ matcher, match, nodes, geometry
     maximumStopOffsetMeters: rounded(Math.max(...stops.map(stop => stop.distanceToRoute))),
     stopProgressMeters: stops.map(stop => stop.distanceAlongRoute) };
 }
-
-// Acceptance depends on the reference geometry and ordered stops, not on a
-// provider's wire format. Keep the original export for TomTom callers.
-export const evaluateLocalRouteAlternative = evaluateTomTomLocalAlternative;

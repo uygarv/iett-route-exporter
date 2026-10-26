@@ -1,6 +1,9 @@
 import os from "node:os";
+import dotenv from "dotenv";
 
 import { createApp } from "./app.js";
+
+dotenv.config();
 
 const port = Number(process.env.PORT) || 3000;
 const host = process.env.HOST || "0.0.0.0";

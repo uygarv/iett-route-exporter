@@ -1,0 +1,1230 @@
+[
+  {
+    "routeCode": "19_D_D0",
+    "maxWaypoints": 9,
+    "partial": false,
+    "waypoints": [
+      {
+        "lat": 40.98453093282373,
+        "lng": 29.090835474377286,
+        "distanceAlongRoute": 3360,
+        "score": 0.16752660555302828,
+        "turnAngle": 3.1360184766336943,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 9.418068286496249
+      },
+      {
+        "lat": 40.96434224733583,
+        "lng": 29.10521109880495,
+        "distanceAlongRoute": 6170,
+        "score": 0.8459333967572603,
+        "turnAngle": 136.69586129738855,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.96940733761229,
+        "lng": 29.109043559658723,
+        "distanceAlongRoute": 6830,
+        "score": 0.1738266205296191,
+        "turnAngle": 26.442493304484287,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.9690791761176,
+        "lng": 29.1158403210111,
+        "distanceAlongRoute": 7499.698528394503,
+        "score": 0.5139347172289954,
+        "turnAngle": 71.16019161632244,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "İÇERENKÖY",
+        "stationIndex": 12,
+        "distanceToRoute": 9.026298095275436,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.97687353223941,
+        "lng": 29.124147774752792,
+        "distanceAlongRoute": 8640,
+        "score": 0.21168505355437123,
+        "turnAngle": 1.0317512508912614,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 6.765570649603003
+      },
+      {
+        "lat": 40.97728570357537,
+        "lng": 29.147646607709447,
+        "distanceAlongRoute": 10998.78727418202,
+        "score": 0.6676421685278888,
+        "turnAngle": 81.23381526369212,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "DARÜLACEZE MÜDÜRLÜĞÜ",
+        "stationIndex": 23,
+        "distanceToRoute": 10.822599784605794,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.97742763592212,
+        "lng": 29.156293668243002,
+        "distanceAlongRoute": 12000,
+        "score": 0.11756950922978462,
+        "turnAngle": 10.751131877963644,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 8.808905714613529
+      },
+      {
+        "lat": 40.98536017935097,
+        "lng": 29.181417498615115,
+        "distanceAlongRoute": 14570,
+        "score": 0.19941248422308835,
+        "turnAngle": 58.39651553039698,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      }
+    ]
+  },
+  {
+    "routeCode": "19_D_D0",
+    "maxWaypoints": 18,
+    "partial": false,
+    "waypoints": [
+      {
+        "lat": 40.985915935735406,
+        "lng": 29.088677619783912,
+        "distanceAlongRoute": 3120,
+        "score": 0.28124148908855645,
+        "turnAngle": 6.516606081574764,
+        "reason": "coverage+segment-boundary",
+        "roles": [
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 9.418068286496249
+      },
+      {
+        "lat": 40.96434224733583,
+        "lng": 29.10521109880495,
+        "distanceAlongRoute": 6170,
+        "score": 0.8459333967572603,
+        "turnAngle": 136.69586129738855,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.96940733761229,
+        "lng": 29.109043559658723,
+        "distanceAlongRoute": 6830,
+        "score": 0.1765278832579316,
+        "turnAngle": 26.442493304484287,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.9690791761176,
+        "lng": 29.1158403210111,
+        "distanceAlongRoute": 7499.698528394503,
+        "score": 0.5139347172289954,
+        "turnAngle": 71.16019161632244,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "İÇERENKÖY",
+        "stationIndex": 12,
+        "distanceToRoute": 9.026298095275436,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.9780572371167,
+        "lng": 29.1282487380102,
+        "distanceAlongRoute": 9118.211507035985,
+        "score": 0.47342026137606413,
+        "turnAngle": 65.55049772899349,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "FİDAN SOKAK",
+        "stationIndex": 17,
+        "distanceToRoute": 6.765640299039901,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.97728570357537,
+        "lng": 29.147646607709447,
+        "distanceAlongRoute": 10998.78727418202,
+        "score": 0.6676421685278888,
+        "turnAngle": 81.23381526369212,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "DARÜLACEZE MÜDÜRLÜĞÜ",
+        "stationIndex": 23,
+        "distanceToRoute": 10.822599784605794,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.97516763540588,
+        "lng": 29.15492793210376,
+        "distanceAlongRoute": 11720,
+        "score": 0.47951984525974345,
+        "turnAngle": 66.39505549750294,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.97938227518731,
+        "lng": 29.159101891560415,
+        "distanceAlongRoute": 12350,
+        "score": 0.2086175304632252,
+        "turnAngle": 33.73341641805382,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.979925442598635,
+        "lng": 29.16563698978025,
+        "distanceAlongRoute": 13000.163227628665,
+        "score": 0.43504468931689205,
+        "turnAngle": 60.198782368181355,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "ÇAMLIK",
+        "stationIndex": 28,
+        "distanceToRoute": 8.808905714541988,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.98536017935097,
+        "lng": 29.181417498615115,
+        "distanceAlongRoute": 14570,
+        "score": 0.43974616959416957,
+        "turnAngle": 58.39651553039698,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      }
+    ]
+  },
+  {
+    "routeCode": "19_D_D0",
+    "maxWaypoints": 9,
+    "partial": true,
+    "waypoints": [
+      {
+        "lat": 40.97168983475327,
+        "lng": 29.10076129918207,
+        "distanceAlongRoute": 5040,
+        "score": 0.07393739354882144,
+        "turnAngle": 3.410605131648481e-13,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 9.418068286496249
+      },
+      {
+        "lat": 40.96434224733583,
+        "lng": 29.10521109880495,
+        "distanceAlongRoute": 6170,
+        "score": 0.8348052387622336,
+        "turnAngle": 136.69586129738855,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.96940733761229,
+        "lng": 29.109043559658723,
+        "distanceAlongRoute": 6830,
+        "score": 0.34213610669193995,
+        "turnAngle": 26.442493304484287,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.9690791761176,
+        "lng": 29.1158403210111,
+        "distanceAlongRoute": 7499.698528394503,
+        "score": 0.5385858838837978,
+        "turnAngle": 71.16019161632244,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "İÇERENKÖY",
+        "stationIndex": 12,
+        "distanceToRoute": 9.026298095275436,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.97687353223941,
+        "lng": 29.124147774752792,
+        "distanceAlongRoute": 8640,
+        "score": 0.15011046578845638,
+        "turnAngle": 1.0317512508912614,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 6.765570649603003
+      },
+      {
+        "lat": 40.9780572371167,
+        "lng": 29.1282487380102,
+        "distanceAlongRoute": 9118.211507035985,
+        "score": 0.6673266506043039,
+        "turnAngle": 65.55049772899349,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "FİDAN SOKAK",
+        "stationIndex": 17,
+        "distanceToRoute": 6.765640299039901,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.976690707568956,
+        "lng": 29.130442878159222,
+        "distanceAlongRoute": 9360,
+        "score": 0.057819575188025545,
+        "turnAngle": 12.381849726462633,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 6.765570649603003
+      }
+    ]
+  },
+  {
+    "routeCode": "256_D_D0",
+    "maxWaypoints": 9,
+    "partial": false,
+    "waypoints": [
+      {
+        "lat": 41.06406946087526,
+        "lng": 28.992136380235266,
+        "distanceAlongRoute": 3120,
+        "score": 0.4674434188198705,
+        "turnAngle": 0.7911883595877498,
+        "reason": "coverage+segment-boundary",
+        "roles": [
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.06573544519491,
+        "lng": 29.013458595852118,
+        "distanceAlongRoute": 5040,
+        "score": 0.07348372213842705,
+        "turnAngle": 13.902111133230733,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 9.30279754342138
+      },
+      {
+        "lat": 41.01199163450771,
+        "lng": 29.059532330789942,
+        "distanceAlongRoute": 12410,
+        "score": 0.23881727806385905,
+        "turnAngle": 25.723698704401613,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.00265379156585,
+        "lng": 29.103430408259293,
+        "distanceAlongRoute": 16800,
+        "score": 0.038496736349605036,
+        "turnAngle": 1.6646455066819499,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.99913398179975,
+        "lng": 29.109620082671405,
+        "distanceAlongRoute": 17990,
+        "score": 0.691740811901721,
+        "turnAngle": 179.5715647580423,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.99309357024154,
+        "lng": 29.106125370313602,
+        "distanceAlongRoute": 19795.086057522785,
+        "score": 0.65,
+        "turnAngle": 96.05500232831662,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "ÜLKER SPOR VE ETKİNLİK SALONU",
+        "stationIndex": 18,
+        "distanceToRoute": 6.205828715432979,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.98767232627529,
+        "lng": 29.103340158278044,
+        "distanceAlongRoute": 20540,
+        "score": 0.3963210471658661,
+        "turnAngle": 65.7658007448457,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.990714858209095,
+        "lng": 29.149873544179528,
+        "distanceAlongRoute": 25790,
+        "score": 0.65,
+        "turnAngle": 149.8865132884407,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.98696014953476,
+        "lng": 29.167110268894447,
+        "distanceAlongRoute": 27740,
+        "score": 0.4375402888386076,
+        "turnAngle": 85.05665723331919,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      }
+    ]
+  },
+  {
+    "routeCode": "256_D_D0",
+    "maxWaypoints": 18,
+    "partial": false,
+    "waypoints": [
+      {
+        "lat": 41.06406946087526,
+        "lng": 28.992136380235266,
+        "distanceAlongRoute": 3120,
+        "score": 0.47748998810008414,
+        "turnAngle": 0.7911883595877498,
+        "reason": "coverage+segment-boundary",
+        "roles": [
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.06573544519491,
+        "lng": 29.013458595852118,
+        "distanceAlongRoute": 5040,
+        "score": 0.186243078423809,
+        "turnAngle": 13.902111133230733,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 9.30279754342138
+      },
+      {
+        "lat": 41.02501284099486,
+        "lng": 29.046431255965274,
+        "distanceAlongRoute": 10560,
+        "score": 0.21443954114180114,
+        "turnAngle": 2.02817318495363e-10,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.01199163450771,
+        "lng": 29.059532330789942,
+        "distanceAlongRoute": 12410,
+        "score": 0.24703678895036202,
+        "turnAngle": 25.723698704401613,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.99913398179975,
+        "lng": 29.109620082671405,
+        "distanceAlongRoute": 17990,
+        "score": 0.691740811901721,
+        "turnAngle": 179.5715647580423,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.99752499881336,
+        "lng": 29.103436700052193,
+        "distanceAlongRoute": 19044.2200262142,
+        "score": 0.65,
+        "turnAngle": 91.53137921117548,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "ARDIÇ SOKAK",
+        "stationIndex": 16,
+        "distanceToRoute": 7.001646614720898,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.99309357024154,
+        "lng": 29.106125370313602,
+        "distanceAlongRoute": 19795.086057522785,
+        "score": 0.65,
+        "turnAngle": 96.05500232831662,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "ÜLKER SPOR VE ETKİNLİK SALONU",
+        "stationIndex": 18,
+        "distanceToRoute": 6.205828715432979,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.98767232627529,
+        "lng": 29.103340158278044,
+        "distanceAlongRoute": 20540,
+        "score": 0.4006789522520802,
+        "turnAngle": 65.7658007448457,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.99244569465644,
+        "lng": 29.132704286831462,
+        "distanceAlongRoute": 23750,
+        "score": 0.6105089998957791,
+        "turnAngle": 84.53201537018481,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.990714858209095,
+        "lng": 29.149873544179528,
+        "distanceAlongRoute": 25790,
+        "score": 0.65,
+        "turnAngle": 149.8865132884407,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.98696014953476,
+        "lng": 29.167110268894447,
+        "distanceAlongRoute": 27740,
+        "score": 0.6142980800184163,
+        "turnAngle": 85.05665723331919,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      }
+    ]
+  },
+  {
+    "routeCode": "256_D_D0",
+    "maxWaypoints": 9,
+    "partial": true,
+    "waypoints": [
+      {
+        "lat": 41.06406946087526,
+        "lng": 28.992136380235266,
+        "distanceAlongRoute": 3120,
+        "score": 0.23436469348509228,
+        "turnAngle": 0.7911883595877498,
+        "reason": "coverage+segment-boundary",
+        "roles": [
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.06573544519491,
+        "lng": 29.013458595852118,
+        "distanceAlongRoute": 5040,
+        "score": 0.08400949642385225,
+        "turnAngle": 13.902111133230733,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 9.30279754342138
+      },
+      {
+        "lat": 41.027107244438675,
+        "lng": 29.045803695033133,
+        "distanceAlongRoute": 10320,
+        "score": 0.22639049463033015,
+        "turnAngle": 2.1168489183764905e-10,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.01199163450771,
+        "lng": 29.059532330789942,
+        "distanceAlongRoute": 12410,
+        "score": 0.3928794448397145,
+        "turnAngle": 25.723698704401613,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.00265379156585,
+        "lng": 29.103430408259293,
+        "distanceAlongRoute": 16800,
+        "score": 0.07241698857696194,
+        "turnAngle": 1.6646455066819499,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.99913398179975,
+        "lng": 29.109620082671405,
+        "distanceAlongRoute": 17990,
+        "score": 0.6774537970821123,
+        "turnAngle": 179.5715647580423,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.99752499881336,
+        "lng": 29.103436700052193,
+        "distanceAlongRoute": 19044.2200262142,
+        "score": 0.65,
+        "turnAngle": 91.53137921117548,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "ARDIÇ SOKAK",
+        "stationIndex": 16,
+        "distanceToRoute": 7.001646614720898,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.99309357024154,
+        "lng": 29.106125370313602,
+        "distanceAlongRoute": 19795.086057522785,
+        "score": 0.65,
+        "turnAngle": 96.05500232831662,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "ÜLKER SPOR VE ETKİNLİK SALONU",
+        "stationIndex": 18,
+        "distanceToRoute": 6.205828715432979,
+        "projectedToRoute": false
+      }
+    ]
+  },
+  {
+    "routeCode": "11T_D_D1011",
+    "maxWaypoints": 9,
+    "partial": false,
+    "waypoints": [
+      {
+        "lat": 41.02439042346958,
+        "lng": 29.008147751002365,
+        "distanceAlongRoute": 2160,
+        "score": 0.12790914421832994,
+        "turnAngle": 2.05279019033037,
+        "reason": "coverage+segment-boundary",
+        "roles": [
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 8.55097028997672
+      },
+      {
+        "lat": 41.02801642247788,
+        "lng": 29.02875462062242,
+        "distanceAlongRoute": 4320,
+        "score": 0.06139430765728741,
+        "turnAngle": 9.401340484235334,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.02141248221832,
+        "lng": 29.041808925662547,
+        "distanceAlongRoute": 6000,
+        "score": 0.21676195088640812,
+        "turnAngle": 15.595714220420405,
+        "reason": "coverage+segment-boundary",
+        "roles": [
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 5.603857151853772
+      },
+      {
+        "lat": 41.00183551402189,
+        "lng": 29.033753551694087,
+        "distanceAlongRoute": 9260,
+        "score": 0.46921512361885875,
+        "turnAngle": 92.05941764991564,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.0024416306672,
+        "lng": 29.0420215712066,
+        "distanceAlongRoute": 10187.547448878475,
+        "score": 0.6909171196102162,
+        "turnAngle": 156.24014241292838,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "ACIBADEM KÖPRÜSÜ",
+        "stationIndex": 26,
+        "distanceToRoute": 10.383351220406029,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.98128225237284,
+        "lng": 29.094597326602564,
+        "distanceAlongRoute": 15830,
+        "score": 0.181091419750448,
+        "turnAngle": 125.01592474870142,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.975645455011836,
+        "lng": 29.15258688383711,
+        "distanceAlongRoute": 21470,
+        "score": 0.7339793528649001,
+        "turnAngle": 179.5123021533832,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.98152696093241,
+        "lng": 29.14277663937854,
+        "distanceAlongRoute": 22800,
+        "score": 0.11841039350319801,
+        "turnAngle": 0.5948208784910776,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 8.127656188478454
+      },
+      {
+        "lat": 40.99006168139177,
+        "lng": 29.151178290539413,
+        "distanceAlongRoute": 24260,
+        "score": 0.3822913545094774,
+        "turnAngle": 79.45617786624871,
+        "reason": "post-turn+segment-boundary",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      }
+    ]
+  },
+  {
+    "routeCode": "11T_D_D1011",
+    "maxWaypoints": 18,
+    "partial": false,
+    "waypoints": [
+      {
+        "lat": 41.02439042346958,
+        "lng": 29.008147751002365,
+        "distanceAlongRoute": 2160,
+        "score": 0.14154451607007068,
+        "turnAngle": 2.05279019033037,
+        "reason": "coverage+segment-boundary",
+        "roles": [
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 8.55097028997672
+      },
+      {
+        "lat": 41.025767255942746,
+        "lng": 29.016081575391542,
+        "distanceAlongRoute": 3140,
+        "score": 0.7065698108665904,
+        "turnAngle": 163.44628746681485,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.02649248311945,
+        "lng": 29.033919461610637,
+        "distanceAlongRoute": 4796.564801697006,
+        "score": 0.20187485004680053,
+        "turnAngle": 30.109479852629875,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "KURUÇEŞME",
+        "stationIndex": 11,
+        "distanceToRoute": 5.303850583656012,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 41.021337810654416,
+        "lng": 29.036732552711516,
+        "distanceAlongRoute": 5570,
+        "score": 0.7269414571098219,
+        "turnAngle": 98.91923374895634,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.01985215726549,
+        "lng": 29.045322063115307,
+        "distanceAlongRoute": 6440,
+        "score": 0.08345063466679997,
+        "turnAngle": 88.817103504555,
+        "reason": "post-turn+segment-boundary",
+        "roles": [
+          "post-turn",
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.00259375751084,
+        "lng": 29.034394236095608,
+        "distanceAlongRoute": 9360,
+        "score": 0.08948374215576481,
+        "turnAngle": 1.8824867611278933,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 9.183777529323201
+      },
+      {
+        "lat": 41.0024416306672,
+        "lng": 29.0420215712066,
+        "distanceAlongRoute": 10187.547448878475,
+        "score": 0.6909171196102162,
+        "turnAngle": 156.24014241292838,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "ACIBADEM KÖPRÜSÜ",
+        "stationIndex": 26,
+        "distanceToRoute": 10.383351220406029,
+        "projectedToRoute": false
+      },
+      {
+        "lat": 40.98866258442285,
+        "lng": 29.08316786857847,
+        "distanceAlongRoute": 14160,
+        "score": 0.09595532745380084,
+        "turnAngle": 0.004371221024598526,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": true,
+        "laneOffsetMeters": 5.469575400480807
+      },
+      {
+        "lat": 40.98128225237284,
+        "lng": 29.094597326602564,
+        "distanceAlongRoute": 15830,
+        "score": 0.7099715495393275,
+        "turnAngle": 125.01592474870142,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.978790718721825,
+        "lng": 29.126580536638915,
+        "distanceAlongRoute": 18770,
+        "score": 0.2427410378646414,
+        "turnAngle": 46.26251874588354,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.975645455011836,
+        "lng": 29.15258688383711,
+        "distanceAlongRoute": 21470,
+        "score": 0.7339793528649001,
+        "turnAngle": 179.5123021533832,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.979481619479664,
+        "lng": 29.142184218503466,
+        "distanceAlongRoute": 22550,
+        "score": 0.6644478258037463,
+        "turnAngle": 86.9853256375601,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 40.98838012089803,
+        "lng": 29.14495529520573,
+        "distanceAlongRoute": 23609.157473688974,
+        "score": 0.31276043295473854,
+        "turnAngle": 41.26896230394982,
+        "reason": "station",
+        "roles": [
+          "station",
+          "post-turn"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0,
+        "stationName": "CEMİLE BESLER İLKOKULU",
+        "stationIndex": 50,
+        "distanceToRoute": 8.95255682627389,
+        "projectedToRoute": false
+      }
+    ]
+  },
+  {
+    "routeCode": "11T_D_D1011",
+    "maxWaypoints": 9,
+    "partial": true,
+    "waypoints": [
+      {
+        "lat": 41.025767255942746,
+        "lng": 29.016081575391542,
+        "distanceAlongRoute": 3140,
+        "score": 0.6781414180111771,
+        "turnAngle": 163.44628746681485,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.02520554779174,
+        "lng": 29.01895303752655,
+        "distanceAlongRoute": 3410,
+        "score": 0.2053701507865301,
+        "turnAngle": 42.01924286817166,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.02801642247788,
+        "lng": 29.02875462062242,
+        "distanceAlongRoute": 4320,
+        "score": 0.5670958558977586,
+        "turnAngle": 9.401340484235334,
+        "reason": "coverage",
+        "roles": [
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.02647514406179,
+        "lng": 29.033953354124634,
+        "distanceAlongRoute": 4800,
+        "score": 0.2189826638799952,
+        "turnAngle": 8.548068685997123,
+        "reason": "coverage+segment-boundary",
+        "roles": [
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.021337810654416,
+        "lng": 29.036732552711516,
+        "distanceAlongRoute": 5570,
+        "score": 0.8142084609005144,
+        "turnAngle": 98.91923374895634,
+        "reason": "post-turn",
+        "roles": [
+          "post-turn",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      },
+      {
+        "lat": 41.01985215726549,
+        "lng": 29.045322063115307,
+        "distanceAlongRoute": 6440,
+        "score": 0.7035643096222869,
+        "turnAngle": 88.817103504555,
+        "reason": "post-turn+segment-boundary",
+        "roles": [
+          "post-turn",
+          "segment-boundary",
+          "coverage"
+        ],
+        "providerAdjusted": false,
+        "laneOffsetMeters": 0
+      }
+    ]
+  }
+]

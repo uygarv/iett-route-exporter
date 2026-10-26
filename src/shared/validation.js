@@ -2,6 +2,19 @@ import { AppError } from "./errors.js";
 
 const MAX_CODE_LENGTH = 100;
 
+export function readStationOption(options, fieldName) {
+  if (options[fieldName] === undefined) return null;
+  const prefix = fieldName === "startStation" ? "START" : "END";
+  if (typeof options[fieldName] !== "string") {
+    throw new AppError(400, `INVALID_${prefix}_STATION`, `${fieldName} must be a string.`);
+  }
+  const value = options[fieldName].trim();
+  if (!value || value.length > 200) {
+    throw new AppError(400, `INVALID_${prefix}_STATION`, `${fieldName} is invalid.`);
+  }
+  return value;
+}
+
 export function requireCode(value, fieldName) {
   if (typeof value !== "string") {
     throw new AppError(400, "INVALID_INPUT", `${fieldName} must be a string.`);

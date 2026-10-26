@@ -3,6 +3,7 @@ coverage/
 .nyc_output/
 dist/
 build/
+docs/
 
 .env
 .env.*
@@ -10,3 +11,4 @@ build/
 
 *.log
 .DS_Store
+.taste-skill/

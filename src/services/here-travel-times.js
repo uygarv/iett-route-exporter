@@ -2,10 +2,10 @@ import { AppError } from "../shared/errors.js";
 import { HERE_HTTP_ATTEMPTS } from "../clients/here-client.js";
 import { createGeometryMatcher } from "../routing/geometry-match.js";
 import { haversineDistance } from "../routing/geometry.js";
-import { evaluateLocalRouteAlternative } from "../routing/tomtom-local-alternative.js";
+import { evaluateLocalRouteAlternative } from "../routing/local-route-alternative.js";
 import { createHereTrace, splitHereTrace, readHereRoute, locateHerePieces, joinHerePieces,
   validatedHereCoverage, estimateHereGaps, herePublicSegments } from "../routing/here-route.js";
-import { compactGeometryMatch, resultEnvelope } from "./travel-time-common.js";
+import { compactGeometryMatch, resultEnvelope } from "../routing/travel-time-result.js";
 
 const point = p => ({ lng: p[0], lat: p[1] });
 const distance = (a, b) => haversineDistance(point(a), point(b));
@@ -18,9 +18,7 @@ export function createHereRoutingService({ hereClient, geometryPolicy, shapeCach
   const matcher = {
     evaluate(reference, returned, reportedLength, stops) {
       const sourceLength = pathLength(reference), returnedLength = pathLength(returned);
-      // Reject obvious large detours before allocating an ordered alignment
-      // matrix. Otherwise an implausibly long provider route could consume
-      // resources proportional to the detour instead of the requested line.
+     
       const fraction = Math.max(0.5, geometryPolicy?.lengthToleranceFraction ?? 0.1);
       if (Math.abs(sourceLength - returnedLength) > Math.max(500, sourceLength * fraction)
         || Math.min(sourceLength, returnedLength) < 2) {
@@ -42,8 +40,7 @@ export function createHereRoutingService({ hereClient, geometryPolicy, shapeCach
     const parts = splitHereTrace(reference), operations = [], repairs = [], matches = [], rejected = [];
     const pieces = [], summaries = [], notices = [], nextHandles = [];
     let httpRequests = 0, sectionCount = 0, elapsed = 0;
-    // One import (plus a stale-handle refresh) and two optional repair attempts
-    // per request-sized source chunk. Exhausting repairs never rejects a line.
+   
     const maximumOperations = parts.length * 4;
     async function call(type, chunkIndex, request) {
       const operation = { type, chunkIndex, httpRequestCount: 0 }; operations.push(operation);
@@ -109,8 +106,7 @@ export function createHereRoutingService({ hereClient, geometryPolicy, shapeCach
         const gaps = chunkPieces.filter(p => p.source === "gap").sort((a, b) => b.distanceMeters - a.distanceMeters);
         for (const gap of gaps.slice(0, 2)) {
           const before = chunkPieces.slice(0, chunkPieces.indexOf(gap));
-          // Include conservative estimates for earlier gaps in the repair's
-          // traffic departure, rather than treating missing roads as zero time.
+         
           const seconds = before.reduce((n, p) => n + (p.duration ?? Math.max(8, Math.ceil(p.distanceMeters / 2.5))), 0)
             + nodes.slice(1, -1).filter(n => n.distanceAlongRoute > part.offset + 0.001
               && n.distanceAlongRoute <= gap.start + part.offset + 0.001).length * options.dwellTimeSeconds;
@@ -142,8 +138,7 @@ export function createHereRoutingService({ hereClient, geometryPolicy, shapeCach
               endDistanceAlongRoute: rounded(gap.end + part.offset), accepted: false, errorCode: error.code });
           }
         }
-        // If a provider changes direction or makes a detour, only independently
-        // validated timing survives. The missing source intervals have no cap.
+        
         estimateHereGaps(chunkPieces);
         pieces.push(...chunkPieces.map(p => ({ ...p, start: p.start + part.start, end: p.end + part.start })));
         elapsed += chunkPieces.reduce((n, p) => n + p.duration, 0)
@@ -204,7 +199,7 @@ export function createHereRoutingService({ hereClient, geometryPolicy, shapeCach
         routingQuality: !providerDistance ? "iett-geometry-estimated-timing" : estimated.length ? "validated-with-iett-section-estimate"
           : approximate ? "here-geometry-approximate" : "here-geometry-validated",
         ...(warnings.length ? { warnings } : {}) };
-      if (options.debug) result.debug = { geometryMatch: match, providerGeometryMatches: matches, discardedProviderSections: rejected,
+      const debug = () => ({ geometryMatch: match, providerGeometryMatches: matches, discardedProviderSections: rejected,
         transportMode: "car", tracePointCount: reference.trace.length, importChunkCount: parts.length,
         routingAnchorCount: reference.via.length, providerSectionCount: sectionCount,
         upstreamRequestCount: httpRequests, maximumUpstreamRequestCount: maximumOperations * 2,
@@ -212,8 +207,8 @@ export function createHereRoutingService({ hereClient, geometryPolicy, shapeCach
         operations, reconstructionRepairs: repairs, providerNotices: notices,
         estimatedSections: estimated.map(p => ({ startDistanceAlongRoute: rounded(p.start + reference.offset),
           endDistanceAlongRoute: rounded(p.end + reference.offset), distanceMeters: rounded(p.distanceMeters),
-          estimatedDurationSeconds: p.duration, ...p.estimation })), providerSummary: summaries };
-      return { result, handles: nextHandles };
+          estimatedDurationSeconds: p.duration, ...p.estimation })), providerSummary: summaries });
+      return { result, handles: nextHandles, debug };
     } catch (error) {
       if (error instanceof AppError) error.details = { ...error.details, upstreamRequestCount: httpRequests,
         maximumUpstreamRequestCount: maximumOperations * 2, geometryAttemptCount: operations.length, maximumGeometryAttemptCount: maximumOperations };
@@ -233,12 +228,12 @@ export function createHereRoutingService({ hereClient, geometryPolicy, shapeCach
     if (!entry() && preparing.has(key)) await preparing.get(key).catch(() => {});
     const cached = entry(), currentGeneration = generation;
     const reference = createHereTrace(prepared.geometry, nodes, options.dwellTimeSeconds);
-    const pending = run(context, reference, cached?.handles).then(({ result, handles }) => {
+    const pending = run(context, reference, cached?.handles).then(({ result, handles, debug }) => {
       if (generation === currentGeneration && handles.some(Boolean)) {
         if (shapes.size >= shapeCacheMaxEntries && !shapes.has(key)) shapes.delete(shapes.keys().next().value);
         shapes.set(key, { handles, expiresAt: cached?.expiresAt ?? Number(clock()) + shapeCacheTtlMs });
       } else if (shapes.get(key) === cached) shapes.delete(key);
-      return result;
+      return { result, debug };
     });
     if (!cached) {
       preparing.set(key, pending);

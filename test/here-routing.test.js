@@ -288,6 +288,30 @@ test("HERE honours result and shape TTLs and the bounded handle cache", async ()
   assert.equal(client.calls.at(-1).method, "import");
 });
 
+test("HERE shares traffic calculations across debug presentations, including pending requests and expiry", async () => {
+  for (const firstDebug of [false, true]) {
+    let now = Date.parse("2026-10-20T06:00:00Z");
+    const { service, client } = setup(undefined, routeData(), { clock: () => now, timingCacheTtlMs: 100 });
+    const first = await service.calculateIettRouteTimes("19_D_D0", { ...options, debug: firstDebug });
+    const second = await service.calculateIettRouteTimes("19_D_D0", { ...options, debug: !firstDebug });
+    assert.equal(client.calls.length, 1);
+    assert.deepEqual(first.total, second.total);
+    assert.equal((firstDebug ? second : first).debug, undefined);
+    assert.equal((firstDebug ? first : second).debug.upstreamRequestCount, 1);
+    now += 101;
+    await service.calculateIettRouteTimes("19_D_D0", { ...options, debug: !firstDebug });
+    assert.equal(client.calls.length, 2);
+  }
+  const { service, client } = setup();
+  const [normal, debug] = await Promise.all([
+    service.calculateIettRouteTimes("19_D_D0", { ...options, debug: false }),
+    service.calculateIettRouteTimes("19_D_D0", { ...options, debug: true })
+  ]);
+  assert.equal(client.calls.length, 1);
+  assert.equal(normal.debug, undefined);
+  assert.ok(debug.debug.providerGeometryMatches.length > 0);
+});
+
 test("HERE preserves every original vertex and stop index when densifying the trace", () => {
   const geometry = buildRouteGeometry("LINESTRING (29 41,29.00001 41.00001,29.00002 41,29.01 41)");
   const nodes = [{ distanceAlongRoute: 0 }, { distanceAlongRoute: geometry.totalLength / 2 }, { distanceAlongRoute: geometry.totalLength }];

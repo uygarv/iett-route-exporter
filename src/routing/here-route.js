@@ -1,10 +1,10 @@
 import { AppError } from "../shared/errors.js";
-import { buildRouteGeometry, pointAlongRoute, findRoutePositionCandidates, haversineDistance } from "./geometry.js";
+import { buildGeometryFromCoordinates, pointAlongRoute, findRoutePositionCandidates, haversineDistance } from "./geometry.js";
 import { decodeFlexiblePolyline } from "./flexible-polyline.js";
-import { publicNode, roundSegmentDistances } from "../services/travel-time-common.js";
+import { publicNode, roundSegmentDistances } from "./travel-time-result.js";
 
 const point = p => ({ lng: p[0], lat: p[1] });
-export const pathGeometry = path => buildRouteGeometry(`LINESTRING (${path.coordinates.map(p => p.join(" ")).join(",")})`,
+export const pathGeometry = path => buildGeometryFromCoordinates(path.coordinates,
   { minimumPointSpacingMeters: 0 });
 const path = points => ({ type: "LineString", coordinates: points.map(p => [p.lng, p.lat]) });
 const nonNegative = n => typeof n === "number" && Number.isFinite(n) && n >= 0;

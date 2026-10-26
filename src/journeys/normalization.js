@@ -3,63 +3,15 @@ import {
   departureLabel, formatTimestamp, localDate, minutesToSeconds,
   normalizeDate, parseTimeInput, timestampOnDate
 } from "./time.js";
-import { StepType, publicError } from "./types.js";
-import { isRecord, normalizeJourneyStep, readRouteStepKeys } from "./steps.js";
+import { isRecord, readRouteStepKeys } from "./steps.js";
 import { normalizeScoring } from "./scoring.js";
+import { expandJourneyPaths, optionIssue, MAX_JOURNEY_OPTIONS } from "./options.js";
 
-export const MAX_CANDIDATES = 500;
+export const MAX_CANDIDATES = MAX_JOURNEY_OPTIONS;
 
 function checkCount(count) {
   if (count > MAX_CANDIDATES) {
     throw new AppError(400, "TOO_MANY_CANDIDATES", `At most ${MAX_CANDIDATES} journey candidates can be evaluated per request.`);
-  }
-}
-
-function problem(status, code, message, stepId) {
-  return { steps: [], selections: [], issue: { status, stepId, code, message } };
-}
-
-function expandStep(raw, stepId, handlers, date) {
-  if (!isRecord(raw)) {
-    return [problem("error", "INVALID_STEP", "Each journey step must be an object.", stepId)];
-  }
-  if (Object.keys(raw).length === 0) {
-    return [problem("skipped", "EMPTY_OPTION", "The journey option is empty.", stepId)];
-  }
-  // An explicitly unavailable service is skipped even if other fields are incomplete.
-  if (Array.isArray(raw.departures) && !raw.departures.length
-    && raw.departure === undefined && raw.departureTime === undefined) {
-    return [problem("skipped", "NO_DEPARTURES", "No departures were supplied for this option.", stepId)];
-  }
-
-  if (raw.type === StepType.BUS_OPTIONS) {
-    if (!isRecord(raw.options)) {
-      return [problem("error", "INVALID_BUS_OPTIONS", "BUS_OPTIONS requires an options object.", stepId)];
-    }
-    if (!Object.keys(raw.options).length) {
-      return [problem("skipped", "EMPTY_OPTIONS", "No journey alternatives were supplied.", stepId)];
-    }
-    const branches = [];
-    for (const [optionId, option] of Object.entries(raw.options)) {
-      for (const branch of expandStep(option, `${stepId}/${optionId}`, handlers, date)) {
-        branches.push({
-          ...branch,
-          selections: [{ stepId, optionId }, ...branch.selections]
-        });
-        checkCount(branches.length);
-      }
-    }
-    return branches;
-  }
-
-  try {
-    const step = normalizeJourneyStep(raw, stepId, handlers, date);
-    if (step.departures?.length === 0) {
-      return [problem("skipped", "NO_DEPARTURES", "No departures were supplied for this option.", stepId)];
-    }
-    return [{ steps: [step], selections: [] }];
-  } catch (error) {
-    return [{ steps: [], selections: [], issue: { status: "error", stepId, ...publicError(error) } }];
   }
 }
 
@@ -68,30 +20,9 @@ function expandRoute(raw, handlers, date) {
   try {
     keys = readRouteStepKeys(raw);
   } catch (error) {
-    return [problem("error", error.code, error.message)];
+    return [optionIssue("error", error.code, error.message)];
   }
-  let paths = [{ steps: [], selections: [] }];
-  for (const key of keys) {
-    if (paths.every(path => path.issue)) break;
-    const choices = expandStep(raw[key], key, handlers, date);
-    const expanded = [];
-    for (const path of paths) {
-      if (path.issue) {
-        expanded.push(path);
-        continue;
-      }
-      for (const choice of choices) {
-        expanded.push({
-          steps: [...path.steps, ...choice.steps],
-          selections: [...path.selections, ...choice.selections],
-          ...(choice.issue ? { issue: choice.issue } : {})
-        });
-        checkCount(expanded.length);
-      }
-    }
-    paths = expanded;
-  }
-  return paths;
+  return expandJourneyPaths(raw, keys, handlers, date, { checkCount }).paths;
 }
 
 function candidateId(routeId, path) {

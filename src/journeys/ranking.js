@@ -5,10 +5,6 @@ export function compareCandidates(first, second) {
     || (first.id < second.id ? -1 : first.id > second.id ? 1 : 0);
 }
 
-export function selectBestCandidate(candidates) {
-  return candidates.filter(candidate => candidate.status === "feasible").sort(compareCandidates)[0] ?? null;
-}
-
 export function selectBestCalculatedOption(options) {
   return options.filter(option => option.status === "calculated").sort(compareCandidates)[0] ?? null;
 }

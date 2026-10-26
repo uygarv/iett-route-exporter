@@ -2,6 +2,19 @@ import { AppError } from "../shared/errors.js";
 
 const DEFAULT_BASE_URL = "https://iett.istanbul/tr/RouteStation/";
 
+export function readRouteRecord(data, routeCode) {
+  if (!Array.isArray(data)) {
+    throw new AppError(502, "IETT_MALFORMED_RESPONSE", "IETT returned an invalid route response.", { routeCode });
+  }
+  if (!data.length) {
+    throw new AppError(404, "IETT_ROUTE_NOT_FOUND", "IETT returned no data for this route code.", { routeCode });
+  }
+  if (!data[0] || typeof data[0] !== "object") {
+    throw new AppError(502, "IETT_MALFORMED_RESPONSE", "IETT returned an invalid route record.", { routeCode });
+  }
+  return data[0];
+}
+
 export class IettClient {
   constructor({ fetchImpl = globalThis.fetch, timeoutMs = 10_000, baseUrl = DEFAULT_BASE_URL,
     cacheTtlMs = 86_400_000, clock = Date.now } = {}) {

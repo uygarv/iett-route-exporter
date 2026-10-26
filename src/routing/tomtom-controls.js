@@ -1,5 +1,5 @@
 import {
-  buildRouteGeometry, pointAlongRoute
+  buildGeometryFromCoordinates, pointAlongRoute
 } from "./geometry.js";
 import { selectWaypoints } from "./waypoints.js";
 
@@ -8,7 +8,7 @@ const MAX_CONTROL_POINTS = 150;
 const returnedGeometries = new Map();
 
 function pathGeometry(path) {
-  return buildRouteGeometry(`LINESTRING (${path.coordinates.map(point => point.join(" ")).join(", ")})`);
+  return buildGeometryFromCoordinates(path.coordinates);
 }
 
 // Supporting path coordinates describe the route without forcing the router to

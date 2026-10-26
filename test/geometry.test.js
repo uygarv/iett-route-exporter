@@ -2,12 +2,29 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildRouteGeometry,
+  buildGeometryFromCoordinates,
   findClosestRoutePosition,
   pointAlongRoute,
   resampleRoute
 } from "../src/routing/geometry.js";
 import { selectWaypoints } from "../src/routing/waypoints.js";
 import { coordinateForRouteMatch } from "../src/routing/stop-projection.js";
+
+test("direct coordinate geometry preserves WKT distances, filtering and projection", () => {
+  const coordinates = [[29, 41], [29.000001, 41], [29.01, 41], [29.01, 41.01]];
+  for (const minimumPointSpacingMeters of [0, 2]) {
+    const options = { minimumPointSpacingMeters };
+    const { projector: directProjector, ...direct } = buildGeometryFromCoordinates(coordinates, options);
+    const { projector: wktProjector, ...wkt } = buildRouteGeometry(
+      `LINESTRING (${coordinates.map(point => point.join(" ")).join(",")})`, options);
+    assert.deepEqual(direct, wkt);
+    assert.deepEqual(directProjector.project({ lat: 41.005, lng: 29.005 }),
+      wktProjector.project({ lat: 41.005, lng: 29.005 }));
+  }
+  for (const invalid of [null, [], [[29, 41]], [[29, 41], [Infinity, 41]], [[29, 41], [0, 0]]]) {
+    assert.throws(() => buildGeometryFromCoordinates(invalid), error => error.code === "IETT_INVALID_GEOMETRY");
+  }
+});
 
 test("parses lng-lat WKT, joins segments, and preserves boundaries", () => {
   const geometry = buildRouteGeometry(
@@ -25,7 +42,7 @@ test("does not use a bare LINESTRING boundary as a waypoint", () => {
   const geometry = buildRouteGeometry(
     "LINESTRING (29 41, 29.01 41)|LINESTRING (29.01 41, 29.02 41)"
   );
-  const selection = selectWaypoints(geometry, { maxWaypoints: 5 });
+  const selection = selectWaypoints(geometry, { debug: true, maxWaypoints: 5 });
   const boundary = selection.candidates.find(candidate => {
     return candidate.roles.length === 1
       && candidate.roles.includes("segment-boundary");
@@ -41,7 +58,7 @@ test("does not use a weak bend as a standalone turn waypoint", () => {
   const geometry = buildRouteGeometry(
     "LINESTRING (29 41, 29.012 41, 29.022 41.003)"
   );
-  const selection = selectWaypoints(geometry, { maxWaypoints: 5 });
+  const selection = selectWaypoints(geometry, { debug: true, maxWaypoints: 5 });
   const weakTurn = selection.candidates.find(candidate => candidate.weakTurnOnly);
 
   assert.ok(weakTurn);
@@ -67,6 +84,7 @@ test("uses nearby stop offsets to keep straight-road waypoints on the travel sid
     };
   });
   const selection = selectWaypoints(geometry, {
+    debug: true,
     maxWaypoints: 3,
     stationConstraints
   });
@@ -114,6 +132,7 @@ test("does not create waypoint positions on gaps between LINESTRING segments", (
   const gapCoordinate = { lat: 41, lng: 29.0015 };
   const gapMatch = findClosestRoutePosition(geometry, gapCoordinate);
   const selection = selectWaypoints(geometry, {
+    debug: true,
     maxWaypoints: 1,
     stationConstraints: [{
       ...gapCoordinate,
@@ -148,14 +167,14 @@ test("shifts an important turn forward and uses fewer than nine points on simple
     "LINESTRING (29 41, 29.01 41, 29.01 41.01, 29.02 41.01)"
   );
   const cornerDistance = pointAlongRoute(turning, 840).distanceAlongRoute;
-  const turnSelection = selectWaypoints(turning, { maxWaypoints: 9 });
+  const turnSelection = selectWaypoints(turning, { debug: true, maxWaypoints: 9 });
   const turnWaypoint = turnSelection.waypoints.find(point => point.reason.includes("post-turn"));
 
   assert.ok(turnWaypoint);
   assert.ok(turnWaypoint.distanceAlongRoute > cornerDistance + 50);
 
   const straight = buildRouteGeometry("LINESTRING (29 40.7, 29 40.97)");
-  const straightSelection = selectWaypoints(straight, { maxWaypoints: 9 });
+  const straightSelection = selectWaypoints(straight, { debug: true, maxWaypoints: 9 });
 
   assert.ok(straightSelection.waypoints.length >= 2);
   assert.ok(straightSelection.waypoints.length <= 3);
@@ -197,6 +216,7 @@ test("keeps nearby stops distinct in the candidate pool", () => {
   const first = pointAlongRoute(geometry, 900);
   const second = pointAlongRoute(geometry, 940);
   const selection = selectWaypoints(geometry, {
+    debug: true,
     maxWaypoints: 4,
     stationConstraints: [
       {
@@ -236,6 +256,7 @@ test("skips redundant straight-road stops in favor of a later turn stop", () => 
     projectedToRoute: false
   });
   const selection = selectWaypoints(geometry, {
+    debug: true,
     maxWaypoints: 3,
     stationConstraints: [
       station("FLAT A", 1, 400),
@@ -263,6 +284,7 @@ test("protects strong turns before weak straight-road stations", () => {
   );
   const weakStation = pointAlongRoute(geometry, 400);
   const selection = selectWaypoints(geometry, {
+    debug: true,
     maxWaypoints: 2,
     stationConstraints: [{
       ...weakStation,
@@ -289,6 +311,7 @@ test("rejects coverage and boundary points inside a turn decision zone", () => {
     "LINESTRING (29 41, 29.01143 41) | LINESTRING (29.01143 41, 29.01143 41.01)"
   );
   const selection = selectWaypoints(geometry, {
+    debug: true,
     maxWaypoints: 2
   });
   const strongTurn = selection.candidates.find(candidate => {

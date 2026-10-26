@@ -1,36 +1,16 @@
 import { AppError } from "../shared/errors.js";
 import {
   findRoutePositionCandidates,
+  findClosestRoutePosition,
   haversineDistance,
   pointAlongRoute
 } from "./geometry.js";
 import { coordinateForRouteMatch } from "./stop-projection.js";
+import { readOptionalCoordinate } from "../shared/validation.js";
+import { stationName as stopName } from "./stations.js";
 
 const MAX_CANDIDATES_PER_STOP = 48;
 const CANDIDATE_PROGRESS_SPACING_METERS = 15;
-
-function stopName(stop) {
-  if (!stop || typeof stop.stationName !== "string") {
-    return null;
-  }
-
-  return stop.stationName.trim() || null;
-}
-
-function stopCoordinate(stop) {
-  const lat = Number(stop?.lat);
-  const lng = Number(stop?.lng);
-
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-    return null;
-  }
-
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-    return null;
-  }
-
-  return { lat, lng };
-}
 
 function reduceCandidates(candidates) {
   const ordered = [...candidates].sort((first, second) => {
@@ -57,7 +37,22 @@ function reduceCandidates(candidates) {
   return selected;
 }
 
-export function matchStopsToRoute(stops, geometry) {
+export function matchStopsToRoute(stops, geometry, { allowInvalidStops = false } = {}) {
+  if (allowInvalidStops) {
+    stops = stops.map((stop, stationIndex) => ({ ...stop, stationIndex }))
+      .filter(stop => stopName(stop) && readOptionalCoordinate(stop));
+    if (stops.length < 2) {
+      return stops.map(stop => {
+        const coordinate = readOptionalCoordinate(stop);
+        const match = findClosestRoutePosition(geometry, coordinate);
+        const providerCoordinate = coordinateForRouteMatch(coordinate, match);
+        return { name: stopName(stop), coordinate, stationIndex: stop.stationIndex,
+          distanceAlongRoute: match.distanceAlongRoute, distanceToRoute: match.distanceToRoute,
+          providerCoordinate, projectedToRoute: providerCoordinate.lat !== coordinate.lat
+            || providerCoordinate.lng !== coordinate.lng };
+      });
+    }
+  }
   if (!Array.isArray(stops) || stops.length < 2) {
     throw new AppError(
       502,
@@ -71,7 +66,7 @@ export function matchStopsToRoute(stops, geometry) {
       ? stop.stationIndex
       : fallbackStationIndex;
     const name = stopName(stop);
-    const coordinate = stopCoordinate(stop);
+    const coordinate = readOptionalCoordinate(stop);
 
     if (!name) {
       throw new AppError(

@@ -80,8 +80,25 @@ export function parseWktSegments(line) {
   });
 }
 
-export function buildRouteGeometry(line, { minimumPointSpacingMeters = 2 } = {}) {
-  const segments = parseWktSegments(line);
+export function buildRouteGeometry(line, options) {
+  return buildGeometry(parseWktSegments(line), options);
+}
+
+export function buildGeometryFromCoordinates(coordinates, options) {
+  if (!Array.isArray(coordinates) || coordinates.length < 2) {
+    throw new AppError(502, "IETT_INVALID_GEOMETRY", "A route path must contain at least two coordinates.");
+  }
+  const points = coordinates.map((coordinate, pointIndex) => {
+    const point = { lng: coordinate?.[0], lat: coordinate?.[1] };
+    if (!Array.isArray(coordinate) || !isIstanbulCoordinate(point)) {
+      throw new AppError(502, "IETT_INVALID_GEOMETRY", "The route path contains an invalid coordinate.", { pointIndex });
+    }
+    return point;
+  });
+  return buildGeometry([points], options);
+}
+
+function buildGeometry(segments, { minimumPointSpacingMeters = 2 } = {}) {
   const rawPointCount = segments.reduce((sum, segment) => sum + segment.length, 0);
   const points = [];
   const cumulativeDistances = [];

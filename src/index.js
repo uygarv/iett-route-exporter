@@ -2,12 +2,9 @@ import { IettClient } from "./clients/iett-client.js";
 import { TomTomClient } from "./clients/tomtom-client.js";
 import { createIettService, parseRouteCode } from "./services/iett-service.js";
 import { createJourneyService } from "./services/journey-service.js";
+import { createServices } from "./create-services.js";
 
-const defaultClient = new IettClient();
-const defaultService = createIettService({ client: defaultClient });
-const defaultJourneyService = createJourneyService({
-  calculateBusTimes: defaultService.calculateIettRouteTimes
-});
+const { client: defaultClient, service: defaultService, journeyService: defaultJourneyService } = createServices();
 
 export { IettClient, TomTomClient, createIettService, parseRouteCode };
 export { createTomTomScheduler } from "./clients/tomtom-scheduler.js";

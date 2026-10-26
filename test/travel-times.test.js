@@ -412,6 +412,32 @@ test("shares pending and successful calculations and evicts failures", async () 
   assert.equal(expiring.tomTomClient.calls.length, 2);
 });
 
+test("normal and debug TomTom responses share one calculation and isolate their presentation", async () => {
+  for (const firstDebug of [false, true]) {
+    const { service, tomTomClient } = createService(10);
+    const options = { departureTime: "2026-10-19T08:00:00+03:00" };
+    const first = await service.calculateIettRouteTimes("256_D_D0", { ...options, debug: firstDebug });
+    const expectedName = first.segments[0].from.name;
+    first.segments[0].from.name = "changed by caller";
+    const second = await service.calculateIettRouteTimes("256_D_D0", { ...options, debug: !firstDebug });
+    assert.equal(tomTomClient.calls.length, 1);
+    assert.equal(second.segments[0].from.name, expectedName);
+    const normal = firstDebug ? second : first;
+    const debug = firstDebug ? first : second;
+    assert.equal(normal.debug, undefined);
+    assert.equal(debug.debug.geometryAttemptCount, 1);
+    assert.deepEqual(normal.total, debug.total);
+  }
+  const { service, tomTomClient } = createService(10);
+  const [normal, debug] = await Promise.all([
+    service.calculateIettRouteTimes("256_D_D0"),
+    service.calculateIettRouteTimes("256_D_D0", { debug: true })
+  ]);
+  assert.equal(tomTomClient.calls.length, 1);
+  assert.equal(normal.debug, undefined);
+  assert.ok(debug.debug.matchedStops.length > 0);
+});
+
 test("reuses route preparation without sharing mutable results or mixing departure times and dwell", async () => {
   const { service, tomTomClient } = createService(10);
   const common = { startStation: "STOP 2", endStation: "STOP 8", debug: true };

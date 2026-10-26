@@ -4,7 +4,7 @@ import test from "node:test";
 import { buildRouteGeometry, pointAlongRoute } from "../src/routing/geometry.js";
 import { createGeometryMatcher } from "../src/routing/geometry-match.js";
 import { matchStopsToRoute, sliceRouteGeometry } from "../src/routing/timing.js";
-import { evaluateTomTomLocalAlternative } from "../src/routing/tomtom-local-alternative.js";
+import { evaluateLocalRouteAlternative } from "../src/routing/local-route-alternative.js";
 import { createTomTomControls, localTomTomPlan } from "../src/routing/tomtom-controls.js";
 
 const fixture = JSON.parse(await readFile(new URL("./fixtures/256-local-routing.json", import.meta.url), "utf8"));
@@ -22,7 +22,7 @@ const matcher = createGeometryMatcher();
 const match = matcher.evaluate(reference, returnedPath, route.legs.reduce((sum, leg) => sum + leg.summary.lengthInMeters, 0),
   nodes.map(node => node.distanceAlongRoute - nodes[0].distanceAlongRoute));
 const plan = localTomTomPlan(nodes, geometry, match, { distances: [], alternativeRanges: [], waypointOnly: false });
-const evaluate = overrides => evaluateTomTomLocalAlternative({ matcher, match, nodes, geometry, returnedPath, plan, ...overrides });
+const evaluate = overrides => evaluateLocalRouteAlternative({ matcher, match, nodes, geometry, returnedPath, plan, ...overrides });
 
 test("a nearby route needs an explicit local repair and retains its original failures when accepted", () => {
   assert.equal(match.valid, false);
@@ -71,7 +71,7 @@ function synthetic(referencePath, returned, stopDistances, ranges) {
     return { name: `STOP ${index}`, stationIndex: index, ...p, providerCoordinate: p };
   });
   const m = createGeometryMatcher();
-  return evaluateTomTomLocalAlternative({ matcher: m,
+  return evaluateLocalRouteAlternative({ matcher: m,
     match: m.evaluate(referencePath, returned, target.totalLength, stopDistances), nodes: localNodes,
     geometry: g, returnedPath: returned, plan: { alternativeRanges: ranges } });
 }

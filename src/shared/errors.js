@@ -30,7 +30,5 @@ export function toErrorBody(error) {
     body.error.details = error.details;
   }
 
-  console.log(`Error: ${status} ${code} - ${message}`);
-
   return { status, body };
 }

@@ -1,4 +1,4 @@
-import { buildRouteGeometry, haversineDistance, pointAlongRoute } from "./geometry.js";
+import { buildGeometryFromCoordinates, haversineDistance, pointAlongRoute } from "./geometry.js";
 
 export const DEFAULT_GEOMETRY_POLICY = Object.freeze({
   sampleSpacingMeters: 10,
@@ -22,7 +22,7 @@ const rounded = value => Math.round(value * 10) / 10;
 const cellKey = (x, y) => `${x},${y}`;
 
 function prepare(coordinates) {
-  const geometry = buildRouteGeometry(`LINESTRING (${coordinates.map(p => p.join(" ")).join(",")})`);
+  const geometry = buildGeometryFromCoordinates(coordinates);
   const points = geometry.points.map(p => geometry.projector.project(p));
   const edges = [], grid = new Map();
   for (let i = 1; i < points.length; i += 1) {
