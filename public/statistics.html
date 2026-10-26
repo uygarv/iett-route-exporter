@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ddd6c6">
+  <title>Sefer istatistikleri · İETT arşiv</title>
+  <meta name="description" content="İETT güzergâhlarının geçmiş varış saatleri ve yolculuk süreleri.">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/assets/fonts/schibsted-grotesk.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="stylesheet" href="/assets/statistics.css">
+  <script type="module" src="/assets/statistics.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#results">Sonuçlara geç</a>
+  <header class="masthead wrap">
+    <a class="wordmark" href="/statistics">İETT arşiv</a>
+    <nav aria-label="Sayfa bağlantıları">
+      <a href="#coverage" id="coverage-link" hidden>Veri kapsamı</a>
+      <a id="api-link" hidden target="_blank" rel="noopener">API</a>
+    </nav>
+  </header>
+  <main class="wrap">
+    <div class="page-heading">
+      <h1>Sefer istatistikleri</h1>
+      <p>Güzergâhların geçmiş varış ve yolculuk süreleri.</p>
+    </div>
+
+    <details id="filter-panel" class="filter-panel" open data-ui>
+    <summary>Sefer seçimi <span id="filter-summary"></span></summary>
+    <form id="statistics-form" class="filters" aria-label="Sefer seçimi">
+      <div class="discovery-row">
+        <div class="field">
+          <label for="line-code">Hat numarası</label>
+          <div class="line-search">
+            <input id="line-code" name="line" placeholder="256" maxlength="100" autocomplete="off" spellcheck="false">
+            <button id="find-line" class="secondary" type="button">Hat bul</button>
+          </div>
+        </div>
+        <div class="field route-field">
+          <div class="field-heading">
+            <label for="route-select" id="route-label">Güzergâh</label>
+            <button id="manual-toggle" class="text-button" type="button" aria-pressed="false">Kodu elle gir</button>
+          </div>
+          <select id="route-select" aria-describedby="line-status">
+            <option value="">Önce hat numarası girin</option>
+          </select>
+          <input id="route-code" name="route_code" placeholder="256_D_D0" maxlength="100" autocomplete="off" spellcheck="false" hidden disabled>
+        </div>
+      </div>
+      <p id="line-status" class="form-note" role="status" hidden></p>
+      <div class="filter-row">
+        <div class="field">
+          <label for="departure-time">Kalkış saati</label>
+          <input id="departure-time" name="departure_time" type="time" step="60" aria-describedby="departure-hint">
+          <span id="departure-hint" class="sr-only">Boş bırakırsanız tüm seferler</span>
+        </div>
+        <div class="field">
+          <label for="date-from">Başlangıç</label>
+          <input id="date-from" name="from" type="date" required>
+        </div>
+        <div class="field">
+          <label for="date-to">Bitiş</label>
+          <input id="date-to" name="to" type="date" required>
+        </div>
+        <div class="field">
+          <label for="weekday">Gün</label>
+          <select id="weekday" name="weekday">
+            <option value="">Bütün günler</option>
+            <option value="1">Pazartesi</option><option value="2">Salı</option>
+            <option value="3">Çarşamba</option><option value="4">Perşembe</option>
+            <option value="5">Cuma</option><option value="6">Cumartesi</option><option value="7">Pazar</option>
+          </select>
+        </div>
+        <button id="show-statistics" class="primary" type="submit">Göster</button>
+      </div>
+      <details class="advanced-filters">
+        <summary>Diğer filtreler</summary>
+        <div class="advanced-grid">
+          <div class="field">
+            <label for="departure-basis">Kalkış referansı</label>
+            <select id="departure-basis" name="departure_basis">
+              <option value="planned">İlk planlanan</option>
+              <option value="adjusted">Güncellenen plan</option>
+              <option value="actual">Gerçek kalkış</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="day-offset">Kalkış günü</label>
+            <select id="day-offset" name="departure_day_offset">
+              <option value="">Varsayılan</option>
+              <option value="0">Hizmet günü</option>
+              <option value="1">Ertesi gün</option>
+            </select>
+          </div>
+        </div>
+      </details>
+    </form>
+    </details>
+
+    <div id="request-status" class="request-status" role="status" aria-live="polite" hidden></div>
+    <div id="results" tabindex="-1" aria-busy="false">
+      <section class="initial-state">
+        <h2>Bir güzergâh seçin</h2>
+        <p>Hat numarasıyla arayın veya güzergâh kodunu girin.</p>
+      </section>
+    </div>
+    <noscript><p>Bu sayfada güzergâh seçimi ve grafikler için JavaScript gereklidir.</p><p><a href="/api/iett/history/19">19 hattının arşivini JSON olarak aç</a></p></noscript>
+  </main>
+  <footer class="footer wrap">
+    <span>İETT arşiv</span>
+    <p>Geçmiş sefer gözlemleri. Saatler İstanbul saatidir.</p>
+  </footer>
+</body>
+</html>

@@ -101,6 +101,13 @@ npm run history:status
 
 ## Route statistics
 
+Open the  page at **[localhost:3000/statistics](http://localhost:3000/statistics)**.
+Enter a line number to load its directions and variants, or enter an exact route
+code manually. A selected route can also be opened directly:
+
+```text
+http://localhost:3000/routes/256_D_D0/statistics?departure_time=07:35
+```
 The underlying JSON endpoint remains available:
 
 ```bash

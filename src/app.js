@@ -1,4 +1,5 @@
 import express from "express";
+import { fileURLToPath } from "node:url";
 import { AppError, toErrorBody } from "./shared/errors.js";
 import { createServices } from "./create-services.js";
 import { summarizeCalculation, summarizeEvaluation } from "./journeys/response.js";
@@ -13,6 +14,13 @@ export function createApp({ service: providedService, journeyService: providedJo
 
   app.disable("x-powered-by");
   app.use(express.json({ limit: "16kb" }));
+
+  app.use("/assets", express.static(fileURLToPath(new URL("../public/assets/", import.meta.url)), { dotfiles: "deny" }));
+  app.get("/", (request, response) => response.redirect("/statistics"));
+  app.get(["/statistics", "/routes/:routeCode/statistics"], (request, response) => {
+    response.set("Cache-Control", "no-store");
+    response.sendFile(fileURLToPath(new URL("../public/statistics.html", import.meta.url)));
+  });
 
   app.get("/health", (request, response) => {
     response.json({ status: "ok" });
