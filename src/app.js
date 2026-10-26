@@ -3,8 +3,9 @@ import { AppError, toErrorBody } from "./shared/errors.js";
 import { createServices } from "./create-services.js";
 import { summarizeCalculation, summarizeEvaluation } from "./journeys/response.js";
 import { createIettHistoryService } from "./services/iett-history-service.js";
+import { createIettStatisticsService } from "./services/iett-statistics-service.js";
 export function createApp({ service: providedService, journeyService: providedJourneyService,
-  historyService = createIettHistoryService() } = {}) {
+  historyService = createIettHistoryService(), statisticsService = createIettStatisticsService() } = {}) {
   const { service, journeyService } = createServices({
     service: providedService, journeyService: providedJourneyService
   });
@@ -20,6 +21,14 @@ export function createApp({ service: providedService, journeyService: providedJo
   app.get("/api/iett/history/:lineCode", async (request, response, next) => {
     try {
       response.json(await historyService.getHistory(request.params.lineCode, request.query));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/iett/routes/:routeCode/statistics", async (request, response, next) => {
+    try {
+      response.json(await statisticsService.getStatistics(request.params.routeCode, request.query));
     } catch (error) {
       next(error);
     }

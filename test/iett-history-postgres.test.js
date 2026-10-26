@@ -8,6 +8,7 @@ import { createHistoryCollector } from "../src/history/collector.js";
 import { createIettHistoryService } from "../src/services/iett-history-service.js";
 import { archiveRecord } from "./fixtures/iett-archive.js";
 import { archiveSourceRecord, normalizeArchiveRecord } from "../src/history/records.js";
+import { testStatisticsPostgres } from "./fixtures/iett-statistics-postgres.js";
 
 const url = process.env.TEST_DATABASE_URL;
 
@@ -61,7 +62,7 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
     } finally {
       await database.query("DROP TRIGGER history_test_corrupt_extra ON iett_history_trips; DROP FUNCTION public.history_test_corrupt_extra()");
     }
-    assert.deepEqual(await migrate(database), ["002_compact_history_payload.sql"]);
+    assert.deepEqual(await migrate(database), ["002_compact_history_payload.sql", "003_history_route_statistics_index.sql"]);
     assert.deepEqual(await migrate(database), []);
     const rows = (await database.query("SELECT t.*, record_date::text AS record_date FROM iett_history_trips t ORDER BY source_id")).rows;
     assert.equal(rows.length, legacy.length);
@@ -220,4 +221,5 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
     assert.equal(rows.length, 3);
   });
 
+  await testStatisticsPostgres(t, database, repository, reset);
 });

@@ -16,6 +16,8 @@ This Express.js service exports IETT (Istanbul public bus) routes to map provide
   as waypoints.
 - **Trip history:** Collect daily IETT archives into PostgreSQL and query a line's
   history with typed fields, readable timestamps and cursor pagination.
+- **Route statistics:** Analyze durations, arrivals by scheduled departure and
+  weekday, departure deviations, headways and coverage from stored history.
 - **JavaScript integration:** Call the route builders directly from another
   Node.js project.
 
@@ -32,6 +34,7 @@ https://iett.istanbul/tr/RouteStation/
 
 - [Run and configuration](#run-and-configuration)
 - [Historical trips](#historical-trips)
+- [Route statistics](#route-statistics)
 - [Example](#example)
 - [Discover line directions and variants](#discover-line-directions-and-variants)
 - [Google Maps](#build-a-google-maps-url), [Apple Maps](#build-an-apple-maps-url),
@@ -95,6 +98,16 @@ npm run history:status
 (1–1000, default 500), and `cursor`. 
 * Follow `pagination.nextCursor` for subsequent pages. 
 * Other endpoints work without a database.
+
+## Route statistics
+
+The underlying JSON endpoint remains available:
+
+```bash
+curl 'http://localhost:3000/api/iett/routes/256_D_D0/statistics'
+curl 'http://localhost:3000/api/iett/routes/256_D_D0/statistics?departure_time=07:55'
+curl 'http://localhost:3000/api/iett/routes/256_D_D0/statistics?departure_time=07:35&weekday=1'
+```
 
 ## Example
 
