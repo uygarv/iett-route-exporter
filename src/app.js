@@ -2,7 +2,9 @@ import express from "express";
 import { AppError, toErrorBody } from "./shared/errors.js";
 import { createServices } from "./create-services.js";
 import { summarizeCalculation, summarizeEvaluation } from "./journeys/response.js";
-export function createApp({ service: providedService, journeyService: providedJourneyService } = {}) {
+import { createIettHistoryService } from "./services/iett-history-service.js";
+export function createApp({ service: providedService, journeyService: providedJourneyService,
+  historyService = createIettHistoryService() } = {}) {
   const { service, journeyService } = createServices({
     service: providedService, journeyService: providedJourneyService
   });
@@ -13,6 +15,14 @@ export function createApp({ service: providedService, journeyService: providedJo
 
   app.get("/health", (request, response) => {
     response.json({ status: "ok" });
+  });
+
+  app.get("/api/iett/history/:lineCode", async (request, response, next) => {
+    try {
+      response.json(await historyService.getHistory(request.params.lineCode, request.query));
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post("/api/journeys/evaluate", async (request, response, next) => {

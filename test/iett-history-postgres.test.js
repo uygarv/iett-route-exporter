@@ -5,6 +5,7 @@ import { createDatabase } from "../src/db/database.js";
 import { migrate } from "../src/db/migrate.js";
 import { HistoryRepository } from "../src/history/repository.js";
 import { createHistoryCollector } from "../src/history/collector.js";
+import { createIettHistoryService } from "../src/services/iett-history-service.js";
 import { archiveRecord } from "./fixtures/iett-archive.js";
 import { archiveSourceRecord, normalizeArchiveRecord } from "../src/history/records.js";
 
@@ -165,6 +166,35 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
     await collector.sync({ automatic: true, refresh: true });
     assert.equal(calls, 3);
     assert.deepEqual(await repository.bounds(), { first_date: "2026-09-26", last_date: "2026-10-28" });
+  });
+
+  await t.test("history filters exact lines, paginates ties and reports missing days", async () => {
+    await reset();
+    await repository.withIngestionLock(async locked => {
+      await locked.enqueueRange("2026-10-24", "2026-10-25");
+      await locked.saveDay("2026-10-25", [archiveRecord({ ID: 1 }), archiveRecord({ ID: 2 }),
+        archiveRecord({ ID: 3, SHATKODU: "19F", SGUZERGAHKODU: "19F_G_D0" }),
+        archiveRecord({ ID: 4, SGUZERGAHKODU: "19_G_D0" })]);
+    });
+    const service = createIettHistoryService({ repository, clock: () => Date.parse("2026-10-26T12:00:00Z") });
+    const first = await service.getHistory("19", { from: "2026-10-24", to: "2026-10-25", limit: "2" });
+    assert.deepEqual(first.data.map(row => row.source_id), [4, 2]);
+    assert.equal(first.pagination.hasMore, true);
+    assert.deepEqual(first.coverage.missingDates, ["2026-10-24"]);
+    assert.equal(first.coverage.complete, false);
+    const second = await service.getHistory("19", { cursor: first.pagination.nextCursor, limit: "2" });
+    assert.deepEqual(second.data.map(row => row.source_id), [1]);
+    assert.equal(second.pagination.hasMore, false);
+    assert.equal(second.data[0].duration_seconds, 2361);
+    const filtered = await service.getHistory("19", { routeCode: "19_D_D0" });
+    assert.deepEqual(filtered.data.map(row => row.source_id), [2, 1]);
+    assert.equal((await service.getHistory("UNKNOWN")).data.length, 0);
+    await assert.rejects(service.getHistory("19F", { cursor: first.pagination.nextCursor }), { code: "INVALID_HISTORY_CURSOR" });
+    await repository.withIngestionLock(async locked => { await locked.saveDay("2026-10-25", []); });
+    const preserved = await service.getHistory("19", { from: "2026-10-25", to: "2026-10-25" });
+    assert.equal(preserved.data.length, 3);
+    assert.equal(preserved.coverage.complete, true);
+    assert.deepEqual(preserved.coverage.emptyDates, ["2026-10-25"]);
   });
 
   await t.test("new ingestion round-trips conversion exceptions and missing fields through PostgreSQL", async () => {

@@ -14,8 +14,8 @@ This Express.js service exports IETT (Istanbul public bus) routes to map provide
   including configurable dwell time.
 - **GPX export:** Download IETT route geometry as a GPX 1.1 track with bus stops
   as waypoints.
-- **Trip history:** Collect daily IETT archives into PostgreSQL with resumable
-  imports and scheduled updates.
+- **Trip history:** Collect daily IETT archives into PostgreSQL and query a line's
+  history with typed fields, readable timestamps and cursor pagination.
 - **JavaScript integration:** Call the route builders directly from another
   Node.js project.
 
@@ -85,6 +85,16 @@ The worker runs separately from the API. It catches up on startup, imports new
 days at 04:00 Europe/Istanbul, refreshes the last three days, and retries failed
 or empty days hourly. Requests run sequentially with a default 1,000 ms delay
 after each response. Previously collected data is retained indefinitely.
+
+```bash
+curl 'http://localhost:3000/api/iett/history/19?from=2026-10-01&to=2026-10-25&limit=500'
+npm run history:status
+```
+
+* Optional filters are `from`, `to` (inclusive `YYYY-MM-DD`), `routeCode`, `limit`
+(1–1000, default 500), and `cursor`. 
+* Follow `pagination.nextCursor` for subsequent pages. 
+* Other endpoints work without a database.
 
 ## Example
 
