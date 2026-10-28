@@ -1,6 +1,7 @@
 import { fetch as proxyFetch, ProxyAgent, Pool } from "undici";
 import { createIbbProxySource, readIbbProxySource } from "./ibb-proxy-source.js";
 import { AppError } from "../shared/errors.js";
+import { diagnosticDetails } from "../shared/error-diagnostics.js";
 
 const responseFailures = new WeakMap();
 
@@ -10,11 +11,19 @@ export async function readIbbResponse(response, format) {
   try {
     return await (typeof format === "function" ? format(response) : response[format]());
   } catch (error) {
-    if (!(error instanceof SyntaxError) && !(error instanceof AppError)) responseFailures.get(response)?.();
+    const context = responseFailures.get(response);
+    if (!(error instanceof SyntaxError) && !(error instanceof AppError)) context?.advance();
+    if (context && error && typeof error === "object") {
+      error.details = { ...diagnosticDetails(error), ...context.details, phase: "response_body" };
+    }
     throw error;
   } finally {
     responseFailures.delete(response);
   }
+}
+
+export function ibbResponseDetails(response) {
+  return responseFailures.get(response)?.details ?? {};
 }
 
 function createProxyAgent(uri) {
@@ -95,6 +104,7 @@ export function createIbbFetch({ sourceUrl = readIbbProxySource(),
     if (!urls.includes(selected)) selected = urls[0];
     const url = selected;
     const index = urls.indexOf(url);
+    const details = { transport: "proxy", proxy: new URL(url).origin, proxyIndex: index + 1, proxyCount: urls.length };
     let failed = false;
     function advance() {
       const cancelled = options.signal?.aborted && options.signal.reason?.name !== "TimeoutError";
@@ -106,7 +116,7 @@ export function createIbbFetch({ sourceUrl = readIbbProxySource(),
       if (!agents.has(url)) agents.set(url, agentFactory(url));
       const response = await fetchImpl(input, { ...options, dispatcher: agents.get(url) });
       if (response.status === 429 || response.status >= 500) advance();
-      responseFailures.set(response, advance);
+      responseFailures.set(response, { advance, details });
       return response;
     } catch (error) {
       // A caller cancellation preserves selection; a request deadline advances
@@ -114,10 +124,13 @@ export function createIbbFetch({ sourceUrl = readIbbProxySource(),
       const timedOut = options.signal?.aborted && options.signal.reason?.name === "TimeoutError";
       if (!timedOut) options.signal?.throwIfAborted();
       advance();
-      if (timedOut) throw options.signal.reason;
+      if (timedOut) {
+        options.signal.reason.details = { ...details, phase: "response_headers", ...diagnosticDetails(error) };
+        throw options.signal.reason;
+      }
       const failure = new Error("The IBB proxy request failed.");
       failure.code = "IBB_PROXY_REQUEST_FAILED";
-      failure.details = { proxyIndex: index + 1, proxyCount: urls.length };
+      failure.details = { ...details, phase: "response_headers", ...diagnosticDetails(error) };
       // Undici may nest a CONNECT error several causes deep. Extract only
       // allowlisted diagnostics, never error messages, URLs or credentials.
       for (let cause = error, depth = 0; cause && depth < 6; cause = cause.cause, depth++) {

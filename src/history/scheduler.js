@@ -1,5 +1,6 @@
 import cron from "node-cron";
 import { localDate, TIME_ZONE } from "./time.js";
+import { errorDiagnostics } from "../shared/error-diagnostics.js";
 
 export function startHistoryScheduler({ collector, repository, clock = Date.now, schedule = cron.schedule,
   setTimer = setTimeout, clearTimer = clearTimeout,
@@ -19,7 +20,8 @@ export function startHistoryScheduler({ collector, repository, clock = Date.now,
   }
   function logError(error, fallback) {
     if (!controller.signal.aborted) {
-      logger({ event: "history.worker.error", date: localDate(clock()), code: error.code ?? fallback });
+      logger({ event: "history.worker.error", at: new Date(Number(clock())).toISOString(), date: localDate(clock()),
+        ...errorDiagnostics(error, fallback) });
     }
   }
   async function planNextRetry(retryDelay = 0, kind = "retry") {

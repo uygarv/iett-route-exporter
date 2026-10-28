@@ -3,12 +3,13 @@ import { IettArchiveClient } from "../clients/iett-archive-client.js";
 import { HistoryRepository } from "./repository.js";
 import { createHistoryCollector } from "./collector.js";
 
-export function createHistoryRuntime() {
+export function createHistoryRuntime({ logger = entry => console.log(JSON.stringify(entry)) } = {}) {
   const database = createDatabase();
   const repository = new HistoryRepository(database);
   const client = new IettArchiveClient({
+    logger,
     delayMs: Number(process.env.IETT_HISTORY_DELAY_MS ?? 1000),
     timeoutMs: Number(process.env.IETT_HISTORY_TIMEOUT_MS ?? 120000)
   });
-  return { database, repository, collector: createHistoryCollector({ repository, client }) };
+  return { database, repository, collector: createHistoryCollector({ repository, client, logger }) };
 }

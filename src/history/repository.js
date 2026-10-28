@@ -1,6 +1,7 @@
 import { createDatabase } from "../db/database.js";
 import { AppError } from "../shared/errors.js";
 import { normalizeArchiveRecord } from "./records.js";
+import { errorDiagnostics } from "../shared/error-diagnostics.js";
 
 const UPSERT = `INSERT INTO iett_history_trips (
   record_date, source_id, archive_task_id, task_id, line_code, route_code,
@@ -66,6 +67,30 @@ export class HistoryRepository {
     }
   }
 
+  // The CLI only writes durable work; it never waits for the ingestion lock.
+  // A version prevents an in-flight import from consuming a newer force request.
+  async requestRange(from, to, { force = false } = {}) {
+    const result = await this.database.query(`INSERT INTO iett_history_import_days AS d(record_date)
+      SELECT day::date FROM generate_series($1::date, $2::date, interval '1 day') AS day
+      ON CONFLICT (record_date) DO UPDATE SET
+        status = CASE WHEN d.status = 'running' THEN 'running' ELSE 'pending' END,
+        next_attempt_at = now(), request_version = d.request_version + 1
+      WHERE $3::boolean OR d.status NOT IN ('success', 'running') RETURNING record_date`, [from, to, force]);
+    return { queued: result.rowCount };
+  }
+
+  async claimNextDay(from, to, { retryNow = false, exclude = [] } = {}) {
+    const result = await this.database.query(`UPDATE iett_history_import_days d SET status = 'running',
+      attempt_count = attempt_count + 1, started_at = now(), last_attempt_at = now()
+      WHERE record_date = (SELECT record_date FROM iett_history_import_days
+        WHERE record_date BETWEEN $1::date AND $2::date AND status NOT IN ('success', 'running')
+        AND ($3::boolean OR next_attempt_at <= now()) AND NOT (record_date = ANY($4::date[]))
+        ORDER BY record_date LIMIT 1 FOR UPDATE)
+      RETURNING record_date::text AS date, request_version AS version, attempt_count AS attempt`,
+    [from, to, retryNow, exclude]);
+    return result.rows[0];
+  }
+
   async dueDates(from, to, { retryNow = false } = {}) {
     const result = await this.database.query(`SELECT record_date::text AS date FROM iett_history_import_days
       WHERE record_date BETWEEN $1::date AND $2::date AND status <> 'success'
@@ -85,17 +110,26 @@ export class HistoryRepository {
       started_at = now(), last_attempt_at = now() WHERE record_date = $1::date`, [date]);
   }
 
-  async markFailure(date, error, status = "failed") {
-    await this.database.query(`UPDATE iett_history_import_days SET status = $2, last_error = $3,
+  async markFailure(date, error, status = "failed", version) {
+    const diagnostic = errorDiagnostics(error);
+    await this.database.query(`UPDATE iett_history_import_days SET
+      status = CASE WHEN request_version > coalesce($5::bigint, request_version) THEN 'pending' ELSE $2 END,
+      last_error = $3, last_error_details = $4::jsonb,
       source_count = CASE WHEN $2 = 'empty' THEN 0 ELSE source_count END,
-      next_attempt_at = now() + interval '1 hour' WHERE record_date = $1::date`,
-    [date, status, error?.code ?? "HISTORY_IMPORT_FAILED"]);
+      next_attempt_at = CASE WHEN request_version > coalesce($5::bigint, request_version)
+        THEN now() ELSE now() + interval '1 hour' END WHERE record_date = $1::date`,
+    [date, status, diagnostic.code, JSON.stringify(diagnostic), version ?? null]);
+  }
+
+  async releaseDay(date) {
+    await this.database.query(`UPDATE iett_history_import_days SET status = 'pending', next_attempt_at = now()
+      WHERE record_date = $1::date AND status = 'running'`, [date]);
   }
 
   // Called on the dedicated client held by withIngestionLock.
-  async saveDay(date, records) {
+  async saveDay(date, records, version) {
     if (!records.length) {
-      await this.markFailure(date, { code: "IETT_ARCHIVE_EMPTY" }, "empty");
+      await this.markFailure(date, { code: "IETT_ARCHIVE_EMPTY" }, "empty", version);
       return { status: "empty", sourceCount: 0 };
     }
     await this.database.query("BEGIN");
@@ -113,8 +147,10 @@ export class HistoryRepository {
         await this.database.query(UPSERT, [JSON.stringify(batch)]);
       }
       const count = (await this.database.query("SELECT count(*)::int AS count FROM iett_history_trips WHERE record_date = $1::date", [date])).rows[0].count;
-      await this.database.query(`UPDATE iett_history_import_days SET status = 'success', source_count = $2,
-        stored_count = $3, last_error = NULL, last_success_at = now() WHERE record_date = $1::date`, [date, records.length, count]);
+      await this.database.query(`UPDATE iett_history_import_days SET
+        status = CASE WHEN request_version > coalesce($4::bigint, request_version) THEN 'pending' ELSE 'success' END,
+        next_attempt_at = now(), source_count = $2, stored_count = $3, last_error = NULL,
+        last_error_details = NULL, last_success_at = now() WHERE record_date = $1::date`, [date, records.length, count, version ?? null]);
       await this.database.query("COMMIT");
       return { status: "success", sourceCount: records.length, storedCount: count };
     } catch (error) {
@@ -150,7 +186,9 @@ export class HistoryRepository {
       coalesce(sum(stored_count), 0)::text AS "storedRecords", max(last_success_at) AS "lastSuccessfulSyncAt"
       FROM iett_history_import_days`)).rows[0];
     const incomplete = (await this.database.query(`SELECT record_date::text AS date, status,
-      attempt_count AS attempts, last_error AS error, next_attempt_at AS "nextAttemptAt", last_success_at AS "lastSuccessfulSyncAt"
+      attempt_count AS attempts, last_error AS error, last_error_details AS "errorDetails",
+      started_at AS "startedAt", last_attempt_at AS "lastAttemptAt",
+      next_attempt_at AS "nextAttemptAt", last_success_at AS "lastSuccessfulSyncAt"
       FROM iett_history_import_days WHERE status <> 'success' ORDER BY record_date`)).rows;
     return { ...summary, incomplete };
   }

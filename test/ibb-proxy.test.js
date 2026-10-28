@@ -153,6 +153,7 @@ test("aborted proxy requests preserve cancellation without advancing the list", 
 
 test("request deadlines advance a stalled proxy before the archive retry", async t => {
   const selected = [];
+  const entries = [];
   const request = createIbbFetch({ source: memorySource(["http://stalled.example/", "http://working.example/"]),
     agentFactory: url => ({ url, close: async () => {} }), fetchImpl: async (url, options) => {
       selected.push(options.dispatcher.url);
@@ -162,14 +163,21 @@ test("request deadlines advance a stalled proxy before the archive retry", async
       return new Response(archiveXml());
     } });
   t.after(() => request.close());
-  const archive = new IettArchiveClient({ fetchImpl: request, timeoutMs: 30, delayMs: 0, sleepImpl: async () => {} });
+  const archive = new IettArchiveClient({ fetchImpl: request, timeoutMs: 30, delayMs: 0, sleepImpl: async () => {}, logger: entry => entries.push(entry) });
   assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
   assert.deepEqual(selected, ["http://stalled.example/", "http://working.example/"]);
+  const failure = entries.find(entry => entry.event === "history.request.failed");
+  assert.equal(failure.proxy, "http://stalled.example");
+  assert.equal(failure.transport, "proxy");
+  assert.equal(failure.proxyCount, 2);
+  assert.equal(failure.phase, "response_headers");
+  assert.equal(failure.code, "IETT_ARCHIVE_TIMEOUT");
 });
 
 test("archive body timeout and interrupted downloads advance to the next proxy", async t => {
   for (const failure of ["timeout", "interrupted"]) {
     const selected = [];
+    const entries = [];
     const request = createIbbFetch({ source: memorySource(["http://broken.example/", "http://working.example/"]),
       agentFactory: url => ({ url, close: async () => {} }), fetchImpl: async (url, options) => {
         selected.push(options.dispatcher.url);
@@ -181,9 +189,12 @@ test("archive body timeout and interrupted downloads advance to the next proxy",
         } }));
       } });
     t.after(() => request.close());
-    const archive = new IettArchiveClient({ fetchImpl: request, timeoutMs: 40, delayMs: 0, sleepImpl: async () => {} });
+    const archive = new IettArchiveClient({ fetchImpl: request, timeoutMs: 40, delayMs: 0, sleepImpl: async () => {}, logger: entry => entries.push(entry) });
     assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
     assert.deepEqual(selected, ["http://broken.example/", "http://working.example/"]);
+    const diagnostic = entries.find(entry => entry.event === "history.request.failed");
+    assert.equal(diagnostic.proxy, "http://broken.example");
+    assert.equal(diagnostic.phase, "response_body");
   }
 });
 
@@ -450,6 +461,9 @@ test("CONNECT 407 gives safe route/archive diagnostics without retrying invalid 
     assert.equal(error.code, "IETT_ARCHIVE_PROXY_AUTH_FAILED");
     assert.equal(error.details.proxyStatus, 407);
     assert.equal(error.details.proxyIndex, 1);
+    assert.equal(error.details.proxy, new URL(tunnel.url).origin);
+    assert.equal(error.details.proxyCount, 1);
+    assert.equal(error.details.phase, "response_headers");
     assert.doesNotMatch(JSON.stringify(error), /secret|password|proxy-user/);
     return true;
   });
@@ -543,7 +557,12 @@ test("discovery timeout covers reading the response body", async t => {
   }), t);
   const source = createIbbProxySource({ sourceUrl: endpoint, timeoutMs: 40 });
   t.after(() => source.close());
-  await assert.rejects(source.get(), { details: { proxySourceCode: "PROXY_SOURCE_FETCH_FAILED" } });
+  await assert.rejects(source.get(), error => {
+    assert.equal(error.details.proxySourceCode, "PROXY_SOURCE_TIMEOUT");
+    assert.equal(error.details.phase, "proxy_discovery");
+    assert.equal(error.details.timeoutMs, 40);
+    return true;
+  });
 });
 
 test("list refresh keeps the working proxy and retires agents removed by the provider", async t => {

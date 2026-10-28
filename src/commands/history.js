@@ -2,9 +2,10 @@ import dotenv from "dotenv";
 import { parseArgs } from "node:util";
 import { migrate } from "../db/migrate.js";
 import { createHistoryRuntime } from "../history/runtime.js";
-import { localDate, shiftDate } from "../history/time.js";
+import { importRange, localDate, shiftDate } from "../history/time.js";
 import { AppError } from "../shared/errors.js";
 import { closeIbbProxyConnections } from "../clients/ibb-fetch.js";
+import { errorDiagnostics } from "../shared/error-diagnostics.js";
 
 dotenv.config({ quiet: true });
 
@@ -12,7 +13,8 @@ let runtime;
 try {
   const action = process.argv[2];
   const { values } = parseArgs({ args: process.argv.slice(3), options: {
-    days: { type: "string" }, from: { type: "string" }, to: { type: "string" }, force: { type: "boolean", default: false }
+    days: { type: "string" }, from: { type: "string" }, to: { type: "string" }, force: { type: "boolean", default: false },
+    wait: { type: "boolean", default: false }
   } });
   if (!["migrate", "sync", "status"].includes(action)) throw new Error("Expected migrate, sync or status.");
   if ((values.from === undefined) !== (values.to === undefined)
@@ -27,6 +29,12 @@ try {
     const yesterday = shiftDate(localDate(Date.now()), -1);
     console.log(JSON.stringify({ ...status, latestExpectedDate: yesterday,
       collectionBehind: status.to == null || status.to < yesterday || status.incomplete.length > 0 }, null, 2));
+  } else if (!values.wait) {
+    const range = importRange({ from: values.from, to: values.to,
+      days: values.days === undefined ? 30 : Number(values.days) });
+    const outcome = await runtime.repository.requestRange(range.from, range.to, { force: values.force });
+    console.log(JSON.stringify({ event: "history.queued", ...range, ...outcome,
+      message: "Queued in PostgreSQL. A running history worker processes these days; check history:status or PM2 logs." }));
   } else {
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -43,9 +51,10 @@ try {
     }
   }
 } catch (error) {
-  console.error(JSON.stringify({ error: error.code ?? "HISTORY_COMMAND_FAILED",
+  const diagnostic = errorDiagnostics(error, "HISTORY_COMMAND_FAILED");
+  console.error(JSON.stringify({ ...diagnostic, error: diagnostic.code,
     message: error instanceof AppError || error instanceof RangeError || (!error.code && !runtime)
-      ? error.message : "The history command failed. Check configuration and database access." }));
+      ? error.message : diagnostic.message }));
   process.exitCode = 1;
 } finally {
   await closeIbbProxyConnections();

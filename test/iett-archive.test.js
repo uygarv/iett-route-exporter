@@ -142,3 +142,52 @@ test("Istanbul calendar, epoch timestamps and overnight durations do not depend 
   assert.throws(() => normalizeArchiveRecord(raw, "2026-10-24"));
   assert.throws(() => normalizeArchiveRecord(archiveRecord({ ID: null }), "2026-10-25"));
 });
+
+test("archive diagnostics preserve each network cause, phase and retry timing without logging secrets", async () => {
+  let now = 0;
+  const entries = [];
+  const client = new IettArchiveClient({ delayMs: 0, clock: () => now,
+    logger: entry => entries.push(entry), sleepImpl: async ms => { now += ms; },
+    fetchImpl: async () => {
+      now += 10_000;
+      throw new TypeError("fetch failed for https://private-user:private-password@example.com/?secret=token", {
+        cause: Object.assign(new Error("private-password"), { code: "UND_ERR_CONNECT_TIMEOUT" })
+      });
+    } });
+  await assert.rejects(client.fetchDay("2026-10-25"), error => {
+    assert.equal(error.code, "IETT_ARCHIVE_REQUEST_FAILED");
+    assert.equal(error.details.networkCode, "UND_ERR_CONNECT_TIMEOUT");
+    assert.equal(error.details.phase, "response_headers");
+    assert.equal(error.details.attempts.length, 3);
+    return true;
+  });
+  const failures = entries.filter(entry => entry.event === "history.request.failed");
+  assert.deepEqual(failures.map(entry => entry.attempt), [1, 2, 3]);
+  assert.deepEqual(failures.map(entry => entry.retryDelayMs), [2000, 4000, null]);
+  assert.deepEqual(failures.map(entry => entry.willRetry), [true, true, false]);
+  assert.ok(failures.every(entry => entry.durationMs === 10_000));
+  assert.doesNotMatch(JSON.stringify(entries), /private-user|private-password|secret=token/);
+});
+
+test("download failures retain byte count and response_body phase, while decode failures do not retry", async () => {
+  const entries = [];
+  const client = new IettArchiveClient({ delayMs: 0, sleepImpl: async () => {}, logger: entry => entries.push(entry),
+    fetchImpl: async () => new Response(new ReadableStream({
+      pull(controller) {
+        if (!this.sent) { this.sent = true; controller.enqueue(new TextEncoder().encode("<partial>")); }
+        else controller.error(new TypeError("terminated", { cause: Object.assign(new Error(), { code: "ECONNRESET" }) }));
+      }
+    })) });
+  await assert.rejects(client.fetchDay("2026-10-25"), error => {
+    assert.equal(error.details.phase, "response_body");
+    assert.equal(error.details.networkCode, "ECONNRESET");
+    assert.equal(error.details.bytesReceived, 9);
+    return true;
+  });
+  const malformed = new IettArchiveClient({ delayMs: 0, fetchImpl: async () => new Response("<broken>") });
+  await assert.rejects(malformed.fetchDay("2026-10-25"), error => {
+    assert.equal(error.details.phase, "decode");
+    assert.equal(error.details.attempts.length, 1);
+    return true;
+  });
+});

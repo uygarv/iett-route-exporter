@@ -37,8 +37,14 @@ export function readIettProxyPolicy(scope, { useProxy, env = process.env } = {})
 export function createIettFetch({ scope, useProxy,
   directFetch = globalThis.fetch, proxyFetch = ibbFetch } = {}) {
   let transport;
-  return (input, options) => {
-    transport ??= readIettProxyPolicy(scope, { useProxy }) ? proxyFetch : directFetch;
+  let selected;
+  const request = (input, options) => {
+    if (!transport) {
+      selected = readIettProxyPolicy(scope, { useProxy }) ? "proxy" : "direct";
+      transport = selected === "proxy" ? proxyFetch : directFetch;
+    }
     return transport(input, options);
   };
+  Object.defineProperty(request, "transport", { get: () => selected });
+  return request;
 }

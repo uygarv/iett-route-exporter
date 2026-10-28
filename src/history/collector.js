@@ -1,6 +1,7 @@
 import { IettArchiveClient } from "../clients/iett-archive-client.js";
 import { HistoryRepository } from "./repository.js";
-import { completedRange, localDate, shiftDate } from "./time.js";
+import { importRange, localDate, shiftDate } from "./time.js";
+import { errorDiagnostics } from "../shared/error-diagnostics.js";
 
 export function createHistoryCollector({ repository = new HistoryRepository(),
   client = new IettArchiveClient(), clock = Date.now,
@@ -9,10 +10,7 @@ export function createHistoryCollector({ repository = new HistoryRepository(),
     async sync({ from, to, days = 30, force = false, automatic = false, refresh = false,
       retryNow = !automatic, retryOnly = false, signal } = {}) {
       const today = localDate(clock());
-      to ??= shiftDate(today, -1);
-      if (!Number.isInteger(days) || days < 1 || days > 36500) throw new RangeError("days must be an integer between 1 and 36500.");
-      from ??= shiftDate(to, 1 - days);
-      completedRange(from, to, clock());
+      ({ from, to } = importRange({ from, to, days }, clock()));
       return repository.withIngestionLock(async (locked, disconnected) => {
         const activeSignal = signal ? AbortSignal.any([signal, disconnected]) : disconnected;
         if (automatic) {
@@ -22,33 +20,42 @@ export function createHistoryCollector({ repository = new HistoryRepository(),
         }
         await locked.enqueueRange(from, to, { force,
           ...(refresh ? { refreshSince: shiftDate(to, -2), refreshDate: today } : {}) });
-        const dates = await locked.dueDates(from, to, { retryNow });
-        const summary = { from, to, scheduled: dates.length, success: 0, empty: 0, failed: 0 };
-        for (const date of dates) {
+        const summary = { from, to, scheduled: 0, success: 0, empty: 0, failed: 0 };
+        const processed = [];
+        for (;;) {
           activeSignal.throwIfAborted();
+          const job = await locked.claimNextDay(from, to, { retryNow, exclude: processed });
+          if (!job) break;
+          const { date, version, attempt } = job;
+          processed.push(date);
+          summary.scheduled++;
           const start = Number(clock());
-          await locked.markRunning(date);
+          logger({ event: "history.import.started", at: new Date(start).toISOString(), date, attempt });
+          let phase = "response_headers";
           try {
             const records = await client.fetchDay(date, { signal: activeSignal });
             activeSignal.throwIfAborted();
-            const outcome = await locked.saveDay(date, records);
+            phase = "database";
+            logger({ event: "history.import.saving", at: new Date(Number(clock())).toISOString(), date, sourceCount: records.length });
+            const outcome = await locked.saveDay(date, records, version);
             summary[outcome.status] += 1;
-            logger({ event: "history.import", date, ...outcome, durationMs: Number(clock()) - start });
+            logger({ event: "history.import", at: new Date(Number(clock())).toISOString(), date, ...outcome, durationMs: Number(clock()) - start });
           } catch (error) {
             if (disconnected.aborted) throw error;
-            await locked.markFailure(date, error);
-            activeSignal.throwIfAborted();
+            if (activeSignal.aborted) {
+              await locked.releaseDay(date);
+              logger({ event: "history.import.cancelled", at: new Date(Number(clock())).toISOString(), date,
+                code: "HISTORY_IMPORT_CANCELLED", durationMs: Number(clock()) - start });
+              throw activeSignal.reason;
+            }
+            error.details = { phase, ...error.details };
+            await locked.markFailure(date, error, "failed", version);
             summary.failed += 1;
-            logger({ event: "history.import", date, status: "failed", code: error.code ?? "HISTORY_IMPORT_FAILED",
-              ...(error.details?.proxyIndex ? { proxyIndex: error.details.proxyIndex,
-                ...(error.details.proxyStatus ? { proxyStatus: error.details.proxyStatus } : {}),
-                ...(error.details.networkCode ? { networkCode: error.details.networkCode } : {}) } : {}),
-              ...(error.details?.proxySourceCode ? { proxySourceCode: error.details.proxySourceCode,
-                ...(error.details.proxySourceStatus ? { proxySourceStatus: error.details.proxySourceStatus } : {}) } : {}),
+            logger({ event: "history.import", at: new Date(Number(clock())).toISOString(), date, status: "failed", ...errorDiagnostics(error),
               durationMs: Number(clock()) - start });
           }
         }
-        logger({ event: "history.sync", ...summary });
+        logger({ event: "history.sync", at: new Date(Number(clock())).toISOString(), ...summary });
         return summary;
       });
     }

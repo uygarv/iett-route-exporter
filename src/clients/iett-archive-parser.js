@@ -66,7 +66,7 @@ export function parseArchiveResponse(xml) {
   return parser.finish();
 }
 
-export async function readArchiveResponse(response, { signal } = {}) {
+export async function readArchiveResponse(response, { signal, onChunk = () => {} } = {}) {
   // Small injected test clients may provide only text(); production fetch
   // responses always use the incremental UTF-8/ReadableStream path below.
   if (!response.body) return parseArchiveResponse(await readIbbResponse(response, "text"));
@@ -74,6 +74,7 @@ export async function readArchiveResponse(response, { signal } = {}) {
     const parser = createArchiveParser();
     const decoder = new TextDecoder("utf-8", { fatal: true });
     for await (const bytes of response.body) {
+      onChunk(bytes.byteLength);
       signal?.throwIfAborted();
       let text;
       try { text = decoder.decode(bytes, { stream: true }); }

@@ -1,3 +1,5 @@
+import { diagnosticDetails } from "../shared/error-diagnostics.js";
+
 export function readIbbProxySource(value = process.env.IBB_PROXY_SOURCE_URL) {
   if (value == null || value.trim() === "") return null;
   try {
@@ -72,7 +74,9 @@ export function createIbbProxySource({ sourceUrl = readIbbProxySource(), fetchIm
             lastError = undefined;
             nextRefreshAt = Number(clock()) + ttlMs;
           } catch (error) {
-            lastError = error?.code === "IBB_PROXY_REQUEST_FAILED" ? error : sourceError("PROXY_SOURCE_FETCH_FAILED");
+            lastError = error?.code === "IBB_PROXY_REQUEST_FAILED" ? error
+              : sourceError(controller.signal.aborted ? "PROXY_SOURCE_TIMEOUT" : "PROXY_SOURCE_FETCH_FAILED");
+            lastError.details = { ...diagnosticDetails(error), ...lastError.details, phase: "proxy_discovery", timeoutMs };
             nextRefreshAt = Number(clock()) + retryMs;
           } finally {
             clearTimeout(timer);

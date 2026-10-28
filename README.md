@@ -117,8 +117,8 @@ configuration is no longer used.
 
 ## Historical trips
 
-Configure `DATABASE_URL`, then migrate and import the last 30 completed Istanbul
-calendar days:
+Configure `DATABASE_URL`, then migrate and queue the last 30 completed Istanbul
+calendar days. Start the worker to process the durable PostgreSQL queue:
 
 ```bash
 npm run db:migrate
@@ -130,9 +130,10 @@ The worker runs separately from the API. It catches up on startup, imports new
 days at 04:00 Europe/Istanbul, and refreshes the last three days. Failed or empty
 days become eligible again one hour after failure. A timer follows the earliest
 `nextAttemptAt`, so retries do not wait for the next clock hour. If an import is
-already running, newly due days are picked up when that cycle finishes; imports
-never overlap. Database changes from other collectors are discovered at least
-once per minute while idle. The 04:00 daily cycle is queued if the worker is busy.
+already running, the queue is checked between individual day imports; imports
+never overlap. Changes outside the active range are picked up on the next cycle.
+While idle, the database queue is checked at least once per minute. The 04:00
+daily cycle is queued if the worker is busy.
 Requests run sequentially with a default 1,000 ms delay after each response.
 Previously collected data is retained indefinitely.
 
@@ -140,15 +141,44 @@ To retry a day manually without waiting for its `nextAttemptAt`:
 
 ```bash
 cd ~/iett-route-exporter
+npm run history:sync -- --from 2026-09-26 --to 2026-10-28
+pm2 logs iett-history-worker --lines 50
+```
+
+`history:sync` now only queues work and returns immediately after the database
+write, with `event: history.queued` and a `queued` day count. It does not fetch IETT
+or wait for the ingestion lock. Keep the worker running; without a worker the
+queue persists until one starts. Successful and currently running days are
+skipped; `--force` re-fetches successful days and queues another pass if a day is
+already running. Existing records are preserved. A request made during an import
+cannot be overwritten by completion of that older import.
+
+For a foreground import that waits for every selected day, use `--wait`:
+
+```bash
 pm2 stop iett-history-worker
-npm run history:sync -- --from 2026-09-27 --to 2026-09-27
+npm run history:sync -- --from 2026-09-28 --to 2026-09-28 --wait
 pm2 start iett-history-worker
 ```
 
-The same command accepts a longer `--from`/`--to` range. Successful days are
-skipped; `--force` is only needed to re-fetch them. Restart the worker even if the
-manual sync exits unsuccessfully. Stopping the worker first releases its advisory
-lock; otherwise the CLI refuses to run while another collector holds that lock.
+Only `--wait` requires stopping the worker to release the ingestion lock. Restart
+it even if the foreground command exits unsuccessfully. Foreground failures or
+empty responses exit with code 1; a busy ingestion lock exits with code 2. Queue
+mode success means jobs were saved, not that downloads succeeded. Today and
+future dates are rejected in both modes. Requests remain sequential to respect
+IETT pacing and avoid holding multiple large days in memory; each day can make
+three attempts with a 120-second deadline per attempt plus backoff.
+
+The worker logs timestamps and progress (`history.import.started`,
+`history.request.started`, `history.request.headers`, `history.request.downloaded`,
+`history.import.saving`, `history.import`). Each failed request logs the attempt,
+duration, retry decision, phase, HTTP/CONNECT status, network cause codes, proxy
+origin/index/count and timeout when available. Raw library messages, credentials,
+source records and database URLs are never logged. The latest day's diagnostic,
+including its three request attempts, is saved in `last_error_details` and shown
+as `errorDetails` by `history:status`. Historical errors are not reconstructed;
+their next attempt will populate details. Graceful cancellation puts the day back
+in the queue rather than recording an opaque error 20.
 
 Archive XML is decoded and parsed incrementally from the response stream. Only
 the JSON result and one day's parsed records are retained; the full XML document

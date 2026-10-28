@@ -9,6 +9,9 @@ import { createIettHistoryService } from "../src/services/iett-history-service.j
 import { archiveRecord } from "./fixtures/iett-archive.js";
 import { archiveSourceRecord, normalizeArchiveRecord } from "../src/history/records.js";
 import { testStatisticsPostgres } from "./fixtures/iett-statistics-postgres.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { IettArchiveClient } from "../src/clients/iett-archive-client.js";
 
 const url = process.env.TEST_DATABASE_URL;
 
@@ -62,7 +65,7 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
     } finally {
       await database.query("DROP TRIGGER history_test_corrupt_extra ON iett_history_trips; DROP FUNCTION public.history_test_corrupt_extra()");
     }
-    assert.deepEqual(await migrate(database), ["002_compact_history_payload.sql", "003_history_route_statistics_index.sql"]);
+    assert.deepEqual(await migrate(database), ["002_compact_history_payload.sql", "003_history_route_statistics_index.sql", "004_history_queue_diagnostics.sql"]);
     assert.deepEqual(await migrate(database), []);
     const rows = (await database.query("SELECT t.*, record_date::text AS record_date FROM iett_history_trips t ORDER BY source_id")).rows;
     assert.equal(rows.length, legacy.length);
@@ -185,6 +188,117 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
     await collector.sync({ automatic: true, refresh: true });
     assert.equal(calls, 3);
     assert.deepEqual(await repository.bounds(), { first_date: "2026-09-26", last_date: "2026-10-28" });
+  });
+
+  await t.test("the CLI queues durable retries without taking the collector lock or fetching IETT", async () => {
+    await reset();
+    await repository.enqueueRange("2026-10-23", "2026-10-25");
+    await database.query(`UPDATE iett_history_import_days SET status = 'success' WHERE record_date = '2026-10-23'`);
+    await database.query(`UPDATE iett_history_import_days SET status = 'failed', next_attempt_at = now() + interval '1 hour'
+      WHERE record_date = '2026-10-24'`);
+    await repository.withIngestionLock(async locked => {
+      await locked.markRunning("2026-10-25");
+      const { stdout } = await promisify(execFile)(process.execPath,
+        ["src/commands/history.js", "sync", "--from", "2026-10-23", "--to", "2026-10-25"],
+        { timeout: 5000, env: { ...process.env, DATABASE_URL: url, DATABASE_SSL_CA_FILE: "",
+          IBB_PROXY_SOURCE_URL: "invalid source must never be used by queueing", IETT_ARCHIVE_USE_PROXY: "true" } });
+      const result = JSON.parse(stdout);
+      assert.equal(result.event, "history.queued");
+      assert.equal(result.queued, 1);
+      await assert.rejects(promisify(execFile)(process.execPath,
+        ["src/commands/history.js", "sync", "--from", "2026-10-24", "--to", "2026-10-24", "--wait"],
+        { timeout: 5000, env: { ...process.env, DATABASE_URL: url, DATABASE_SSL_CA_FILE: "" } }), error => {
+        assert.equal(error.code, 2);
+        assert.match(error.stdout, /Another history collector is already running/);
+        return true;
+      });
+      const state = (await locked.database.query(`SELECT record_date::text AS date, status,
+        next_attempt_at <= now() AS due FROM iett_history_import_days ORDER BY record_date`)).rows;
+      assert.deepEqual(state.map(row => row.status), ["success", "pending", "running"]);
+      assert.equal(state[1].due, true);
+    });
+  });
+
+  await t.test("a forced request during ingestion survives both success and failure of the active version", async () => {
+    for (const outcome of ["success", "failure", "empty"]) {
+      await reset();
+      await repository.requestRange("2026-10-25", "2026-10-25");
+      await repository.withIngestionLock(async locked => {
+        const job = await locked.claimNextDay("2026-10-25", "2026-10-25");
+        assert.equal(job.version, "0");
+        await repository.requestRange("2026-10-25", "2026-10-25", { force: true });
+        if (outcome === "failure") {
+          await locked.markFailure(job.date, { code: "IETT_ARCHIVE_REQUEST_FAILED",
+            details: { networkCode: "ECONNRESET", proxy: "http://secret-user:secret-password@proxy.example/path?key=secret" } }, "failed", job.version);
+        } else {
+          await locked.saveDay(job.date, outcome === "empty" ? [] : [archiveRecord()], job.version);
+        }
+        const state = (await locked.database.query("SELECT *, next_attempt_at <= now() AS due FROM iett_history_import_days")).rows[0];
+        assert.equal(state.status, "pending", outcome);
+        assert.equal(state.due, true);
+        const next = await locked.claimNextDay(job.date, job.date);
+        assert.equal(next.version, "1");
+        if (outcome === "failure") {
+          assert.equal(state.last_error_details.networkCode, "ECONNRESET");
+          assert.equal(state.last_error_details.proxy, "http://proxy.example");
+          assert.doesNotMatch(JSON.stringify(state.last_error_details), /secret/);
+        }
+        await locked.saveDay(next.date, [archiveRecord()], next.version);
+        const final = (await locked.database.query("SELECT status, last_error, last_error_details FROM iett_history_import_days")).rows[0];
+        assert.deepEqual(final, { status: "success", last_error: null, last_error_details: null });
+      });
+    }
+  });
+
+  await t.test("an active cycle discovers newly queued days between imports", async () => {
+    await reset();
+    await repository.requestRange("2026-10-23", "2026-10-24");
+    await database.query(`UPDATE iett_history_import_days SET status = 'failed', next_attempt_at = now() + interval '1 hour'
+      WHERE record_date = '2026-10-24'`);
+    const calls = [];
+    const collector = createHistoryCollector({ repository, clock: () => Date.parse("2026-10-26T12:00:00Z"), logger: () => {},
+      client: { fetchDay: async date => {
+        calls.push(date);
+        if (calls.length === 1) await repository.requestRange("2026-10-24", "2026-10-24");
+        return [archiveRecord({ NKAYITGUNU: Number(date.replaceAll("-", "")) })];
+      } } });
+    await collector.sync({ automatic: true, retryOnly: true });
+    assert.deepEqual(calls, ["2026-10-23", "2026-10-24"]);
+  });
+
+  await t.test("a graceful cancellation returns the day to the queue instead of storing error 20", async () => {
+    await reset();
+    const controller = new AbortController();
+    const entries = [];
+    const collector = createHistoryCollector({ repository, logger: entry => entries.push(entry),
+      client: { fetchDay: async () => { controller.abort(); throw controller.signal.reason; } } });
+    await assert.rejects(collector.sync({ from: "2026-10-25", to: "2026-10-25", signal: controller.signal }), { name: "AbortError" });
+    const state = (await repository.status()).incomplete[0];
+    assert.equal(state.status, "pending");
+    assert.equal(state.error, null);
+    assert.equal(entries.at(-1).event, "history.import.cancelled");
+    assert.ok(new Date(state.nextAttemptAt).getTime() <= Date.now());
+  });
+
+  await t.test("status persists the three real network attempts and logs progress before requests finish", async () => {
+    await reset();
+    const entries = [];
+    const logger = entry => entries.push(entry);
+    const client = new IettArchiveClient({ delayMs: 0, sleepImpl: async () => {}, logger, fetchImpl: async () => {
+      assert.equal(entries.at(-1).event, "history.request.started");
+      throw new TypeError("private-password", { cause: Object.assign(new Error("secret"), { code: "UND_ERR_CONNECT_TIMEOUT" }) });
+    } });
+    const collector = createHistoryCollector({ repository, client, logger });
+    const outcome = await collector.sync({ from: "2026-10-25", to: "2026-10-25" });
+    assert.equal(outcome.result.failed, 1);
+    const state = (await repository.status()).incomplete[0];
+    assert.equal(state.error, "IETT_ARCHIVE_REQUEST_FAILED");
+    assert.equal(state.errorDetails.networkCode, "UND_ERR_CONNECT_TIMEOUT");
+    assert.equal(state.errorDetails.attempts.length, 3);
+    assert.equal(state.errorDetails.phase, "response_headers");
+    assert.ok(state.lastAttemptAt);
+    assert.equal(entries[0].event, "history.import.started");
+    assert.doesNotMatch(JSON.stringify({ entries, state }), /private-password|secret/);
   });
 
   await t.test("history filters exact lines, paginates ties and reports missing days", async () => {

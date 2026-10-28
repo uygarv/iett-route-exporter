@@ -32,6 +32,13 @@ export function completedRange(from, to, now = Date.now()) {
   return { from, to };
 }
 
+export function importRange({ from, to, days = 30 } = {}, now = Date.now()) {
+  if (!Number.isInteger(days) || days < 1 || days > 36500) throw new RangeError("days must be an integer between 1 and 36500.");
+  to ??= shiftDate(localDate(now), -1);
+  from ??= shiftDate(to, 1 - days);
+  return completedRange(from, to, now);
+}
+
 export function archiveTimestamp(value) {
   if (typeof value !== "string") return null;
   const match = /^\/Date\((-?\d+)(?:[+-]\d{4})?\)\/$/.exec(value);
