@@ -12,6 +12,7 @@
   --paper:#e9e8e4;
   --ink:#2a2a26;
   --muted:#49483f;
+  --placeholder:#8b897f;
   --accent:#c49a27;
   --accent-dark:#73520b;
   --accent-soft:#e5d39c;
@@ -122,7 +123,8 @@ select {
 }
 
 input::placeholder {
-  color:var(--muted);
+  color:var(--placeholder);
+  opacity:1;
 }
 
 h1,h2,h3,p,dl,dd {
