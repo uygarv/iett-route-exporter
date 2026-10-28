@@ -4,7 +4,7 @@ const time = value => value == null ? 0 : new Date(value).getTime();
 const keyOf = (proxy, origin) => `${origin}|${new URL(proxy).origin}`;
 
 export function createProxyHealth({ repository, clock = Date.now,
-  probeTimeoutMs = Number(process.env.IBB_PROXY_PROBE_TIMEOUT_MS?.trim() || 1500),
+  probeTimeoutMs = Number(process.env.IBB_PROXY_PROBE_TIMEOUT_MS?.trim() || 5000),
   freshMs = 120_000, cooldownMs = 60_000, loadWaitMs = 200,
   logger = entry => console.log(JSON.stringify(entry)) } = {}) {
   for (const value of [probeTimeoutMs, freshMs, cooldownMs, loadWaitMs]) {
@@ -92,7 +92,7 @@ export function createProxyHealth({ repository, clock = Date.now,
     const controller = new AbortController();
     const started = Number(clock());
     const timeout = new DOMException("The proxy probe timed out.", "TimeoutError");
-    timeout.details = { networkCode: "PROXY_PROBE_TIMEOUT", phase: "proxy_probe" };
+    timeout.details = { networkCode: "PROXY_PROBE_TIMEOUT", phase: "proxy_probe", probeTimeoutMs };
     const timer = setTimeout(() => controller.abort(timeout), probeTimeoutMs);
     const promise = Promise.resolve().then(async () => {
       try {
@@ -144,18 +144,22 @@ export function createProxyHealth({ repository, clock = Date.now,
         return cached;
       }
       const candidates = ranked.slice(0, 2);
+      function unavailable(code, message) {
+        const eligible = urls.filter(url => !(state(url).cooldownUntil > Number(clock())));
+        const earliest = Math.min(...urls.map(url => state(url).cooldownUntil ?? Number(clock())));
+        const retryAfterMs = eligible.length ? 1000 : Math.max(1000, Math.min(60_000, earliest - Number(clock())));
+        const error = new Error(message);
+        error.code = "IBB_PROXY_UNAVAILABLE";
+        error.details = { proxySourceCode: code, phase: "proxy_probe", proxyCount: urls.length,
+          retryAfterMs, requestSent: false, probeTimeoutMs };
+        return error;
+      }
       if (!candidates.length) {
-        const error = new Error("All listed proxies are temporarily cooling down.");
-        error.code = "IBB_PROXY_REQUEST_FAILED";
-        error.details = { proxySourceCode: "PROXY_COOLDOWN", phase: "proxy_probe" };
-        throw error;
+        throw unavailable("PROXY_COOLDOWN", "All listed proxies are temporarily cooling down.");
       }
       try { return await Promise.any(candidates.map(url => probe(url, origin, runProbe))); }
       catch {
-        const error = new Error("No tested proxy could reach the IBB endpoint.");
-        error.code = "IBB_PROXY_REQUEST_FAILED";
-        error.details = { proxySourceCode: "PROXY_PROBE_FAILED", phase: "proxy_probe", proxyCount: urls.length };
-        throw error;
+        throw unavailable("PROXY_PROBE_FAILED", "No tested proxy could reach the IBB endpoint.");
       }
     },
     success(url, input, details) { record(url, new URL(input).origin, "request", "success", details); },

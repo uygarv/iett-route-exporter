@@ -102,12 +102,13 @@ export class IettClient {
       if (error instanceof AppError) throw error;
       const timedOut = controller.signal.aborted || error?.name === "AbortError";
       const proxyAuthFailed = error.code === "IBB_PROXY_REQUEST_FAILED" && error.details?.proxyStatus === 407;
+      const proxyUnavailable = error.code === "IBB_PROXY_UNAVAILABLE";
 
       throw new AppError(
-        502,
-        timedOut ? "IETT_TIMEOUT" : proxyAuthFailed ? "IETT_PROXY_AUTH_FAILED" : "IETT_REQUEST_FAILED",
-        timedOut ? "The IETT request timed out." : proxyAuthFailed ? "The IBB proxy rejected authentication." : "The IETT request failed.",
-        { endpoint: path, ...(error.code === "IBB_PROXY_REQUEST_FAILED" ? error.details : {}) }
+        proxyUnavailable ? 503 : 502,
+        timedOut ? "IETT_TIMEOUT" : proxyUnavailable ? "IETT_PROXY_UNAVAILABLE" : proxyAuthFailed ? "IETT_PROXY_AUTH_FAILED" : "IETT_REQUEST_FAILED",
+        timedOut ? "The IETT request timed out." : proxyUnavailable ? "No proxy is ready for IETT requests." : proxyAuthFailed ? "The IBB proxy rejected authentication." : "The IETT request failed.",
+        { endpoint: path, ...(["IBB_PROXY_REQUEST_FAILED", "IBB_PROXY_UNAVAILABLE"].includes(error.code) ? error.details : {}) }
       );
     } finally {
       clearTimeout(timeout);

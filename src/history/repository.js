@@ -75,6 +75,11 @@ export class HistoryRepository {
     return { queued: result.rowCount };
   }
 
+  async requeueProxyFailures() {
+    await this.database.query(`UPDATE iett_history_import_days SET status = 'pending', next_attempt_at = now()
+      WHERE status = 'failed' AND last_error_details->>'phase' = 'proxy_probe'`);
+  }
+
   async claimNextDay(from, to, { retryNow = false, exclude = [] } = {}) {
     const result = await this.database.query(`UPDATE iett_history_import_days d SET status = 'running',
       attempt_count = attempt_count + 1, started_at = now(), last_attempt_at = now()
@@ -120,6 +125,22 @@ export class HistoryRepository {
   async releaseDay(date) {
     await this.database.query(`UPDATE iett_history_import_days SET status = 'pending', next_attempt_at = now()
       WHERE record_date = $1::date AND status = 'running'`, [date]);
+  }
+
+  async deferForProxy(date, { from, to, error, version, attempted }) {
+    const retryAfterMs = Math.max(1000, Math.min(60_000, Number(error.details?.retryAfterMs) || 30_000));
+    const diagnostic = errorDiagnostics(error);
+    const result = await this.database.query(`UPDATE iett_history_import_days SET status = 'pending',
+      attempt_count = greatest(0, attempt_count - $5::int), last_error = $2, last_error_details = $3::jsonb,
+      next_attempt_at = CASE WHEN request_version > $4::bigint THEN now()
+        ELSE now() + $6::double precision * interval '1 millisecond' END
+      WHERE record_date = $1::date RETURNING next_attempt_at AS "retryAt"`,
+    [date, diagnostic.code, JSON.stringify(diagnostic), version, attempted ? 0 : 1, retryAfterMs]);
+    await this.database.query(`UPDATE iett_history_import_days
+      SET next_attempt_at = now() + $4::double precision * interval '1 millisecond'
+      WHERE record_date BETWEEN $1::date AND $2::date AND record_date <> $3::date
+      AND status NOT IN ('success', 'running') AND next_attempt_at <= now()`, [from, to, date, retryAfterMs]);
+    return result.rows[0];
   }
   async saveDay(date, records, version) {
     if (!records.length) {

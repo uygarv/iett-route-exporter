@@ -73,7 +73,13 @@ test("failed candidates cool down, alternatives are used, and expiry permits a s
   const run = async () => {};
   await health.select([urls[0]], origin, undefined, run);
   health.failure(urls[0], origin, { durationMs: 10, error: { code: "ECONNRESET" } });
-  await assert.rejects(health.select([urls[0]], origin, undefined, run), { details: { proxySourceCode: "PROXY_COOLDOWN", phase: "proxy_probe" } });
+  await assert.rejects(health.select([urls[0]], origin, undefined, run), error => {
+    assert.equal(error.code, "IBB_PROXY_UNAVAILABLE");
+    assert.equal(error.details.proxySourceCode, "PROXY_COOLDOWN");
+    assert.equal(error.details.requestSent, false);
+    assert.equal(error.details.retryAfterMs, 1000);
+    return true;
+  });
   assert.equal(await health.select(urls.slice(0, 2), origin, urls[0], run), urls[1]);
   now += 101;
   let checked = 0;
@@ -130,4 +136,29 @@ test("measured transfer speed ranks stale candidates ahead of provider ordering 
   const tested = [];
   assert.equal(await health.select(urls, origin, undefined, async url => { tested.push(url); }), urls[1]);
   assert.deepEqual(tested, [urls[1], urls[2]]);
+});
+
+test("probe unavailability supplies the next cooldown deadline without inventing an archive request", async t => {
+  let now = Date.now();
+  const health = createProxyHealth({ logger: quiet, clock: () => now, cooldownMs: 20000 });
+  t.after(() => health.close());
+  const failed = async () => { throw Object.assign(new Error(), { code: "ECONNREFUSED" }); };
+  await assert.rejects(health.select(urls, origin, undefined, failed), error => {
+    assert.equal(error.code, "IBB_PROXY_UNAVAILABLE");
+    assert.equal(error.details.proxySourceCode, "PROXY_PROBE_FAILED");
+    assert.equal(error.details.retryAfterMs, 1000);
+    assert.equal(error.details.probeTimeoutMs, 5000);
+    return true;
+  });
+  await assert.rejects(health.select([urls[0], urls[1]], origin, undefined, failed), error => {
+    assert.equal(error.details.proxySourceCode, "PROXY_COOLDOWN");
+    assert.equal(error.details.retryAfterMs, 20000);
+    assert.equal(error.details.requestSent, false);
+    return true;
+  });
+  now += 15000;
+  await assert.rejects(health.select([urls[0]], origin, undefined, failed), error => {
+    assert.equal(error.details.retryAfterMs, 5000);
+    return true;
+  });
 });

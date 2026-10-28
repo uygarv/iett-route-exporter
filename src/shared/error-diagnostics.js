@@ -14,6 +14,7 @@ const explanations = {
   UNABLE_TO_VERIFY_LEAF_SIGNATURE: "TLS certificate verification failed.",
   CERT_HAS_EXPIRED: "The TLS certificate has expired.",
   IETT_ARCHIVE_TIMEOUT: "The archive request deadline expired.",
+  IETT_ARCHIVE_PROXY_UNAVAILABLE: "No proxy is ready; archive collection is temporarily deferred.",
   IBB_PROXY_CONFIGURATION_ERROR: "The proxy configuration is missing or invalid.",
   IBB_TIMEOUT_CONFIGURATION_ERROR: "The connection or header timeout configuration is invalid.",
   IETT_ARCHIVE_INVALID_XML: "IETT returned invalid archive XML.",
@@ -49,10 +50,11 @@ export function diagnosticDetails(error) {
   for (const key of ["networkCode", "proxySourceCode", "databaseCode"]) {
     if (typeof details[key] === "string" && codePattern.test(details[key])) result[key] = details[key];
   }
-  for (const key of ["proxyIndex", "proxyCount", "proxyStatus", "proxySourceStatus", "status", "retryAfterMs", "timeoutMs", "connectTimeoutMs", "headersTimeoutMs", "bytesReceived"]) {
+  for (const key of ["proxyIndex", "proxyCount", "proxyStatus", "proxySourceStatus", "status", "retryAfterMs", "timeoutMs", "connectTimeoutMs", "headersTimeoutMs", "probeTimeoutMs", "bytesReceived"]) {
     if (Number.isSafeInteger(details[key]) && details[key] >= 0) result[key] = details[key];
   }
   if (phases.has(details.phase)) result.phase = details.phase;
+  if (typeof details.requestSent === "boolean") result.requestSent = details.requestSent;
   const errorName = details.errorName ?? error?.name;
   if (["Error", "TypeError", "TimeoutError", "AbortError", "AggregateError", "AppError", "SyntaxError"].includes(errorName)) result.errorName = errorName;
   if (["direct", "proxy"].includes(details.transport)) result.transport = details.transport;

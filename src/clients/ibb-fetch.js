@@ -141,7 +141,7 @@ export function createIbbFetch({ sourceUrl = readIbbProxySource(),
     if (closed) throw new Error("The IBB proxy transport is closed.");
     const url = selected;
     const index = urls.indexOf(url);
-    const details = { transport: "proxy", proxy: new URL(url).origin, proxyIndex: index + 1, proxyCount: urls.length, ...limits };
+    const details = { transport: "proxy", proxy: new URL(url).origin, proxyIndex: index + 1, proxyCount: urls.length, requestSent: true, ...limits };
     let failed = false;
     let completed = false;
     let bytes = 0;

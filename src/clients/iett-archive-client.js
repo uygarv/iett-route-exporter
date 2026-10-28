@@ -52,14 +52,15 @@ export class IettArchiveClient {
         return records;
       } catch (error) {
         signal?.throwIfAborted();
-        const retryable = ["IETT_ARCHIVE_TIMEOUT", "IETT_ARCHIVE_REQUEST_FAILED"].includes(error.code)
+        const unavailable = error.code === "IETT_ARCHIVE_PROXY_UNAVAILABLE";
+        const retryable = !unavailable && (["IETT_ARCHIVE_TIMEOUT", "IETT_ARCHIVE_REQUEST_FAILED"].includes(error.code)
           || error.code === "IETT_ARCHIVE_PROXY_AUTH_FAILED" && error.details?.proxyCount > 1
-          || error.details?.status === 429 || error.details?.status >= 500;
+          || error.details?.status === 429 || error.details?.status >= 500);
         const willRetry = retryable && attempt < 2;
         const retryDelayMs = willRetry ? Math.max(this.delayMs, 2_000 * 2 ** attempt, error.details?.retryAfterMs ?? 0) : null;
         const diagnostic = { attempt: attempt + 1, durationMs: Number(this.clock()) - start, ...errorDiagnostics(error) };
         attempts.push(diagnostic);
-        this.logger({ event: "history.request.failed", at: new Date(Number(this.clock())).toISOString(),
+        this.logger({ event: unavailable ? "history.request.deferred" : "history.request.failed", at: new Date(Number(this.clock())).toISOString(),
           date, ...diagnostic, willRetry, retryDelayMs });
         if (!willRetry) {
           error.details = { ...error.details, attempts };
@@ -106,6 +107,11 @@ export class IettArchiveClient {
         if (["IETT_ARCHIVE_INVALID_XML", "IETT_ARCHIVE_INVALID_JSON", "IETT_ARCHIVE_SOAP_FAULT"].includes(error.code)) details.phase = "decode";
         error.details = { ...error.details, ...details };
         throw error;
+      }
+      if (error.code === "IBB_PROXY_UNAVAILABLE" || error.code === "IBB_PROXY_REQUEST_FAILED" && error.details?.proxySourceCode) {
+        details.requestSent = false;
+        details.retryAfterMs ??= 60_000;
+        throw new AppError(503, "IETT_ARCHIVE_PROXY_UNAVAILABLE", "No proxy is ready for archive requests.", details);
       }
       if (error.code === "IBB_PROXY_REQUEST_FAILED" && error.details?.proxyStatus === 407) {
         throw new AppError(502, "IETT_ARCHIVE_PROXY_AUTH_FAILED", "The IBB proxy rejected authentication.", details);

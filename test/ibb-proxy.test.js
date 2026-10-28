@@ -763,3 +763,16 @@ test("HTTP 200 followed by an interrupted archive records a failed partial trans
   assert.equal(transfers[0].code, "ECONNRESET");
   assert.equal(transfers[0].downloadBps, undefined);
 });
+
+test("route clients expose temporary proxy unavailability with its retry delay", async () => {
+  const client = new IettClient({ fetchImpl: async () => {
+    throw Object.assign(new Error(), { code: "IBB_PROXY_UNAVAILABLE",
+      details: { phase: "proxy_probe", proxySourceCode: "PROXY_COOLDOWN", retryAfterMs: 30000, requestSent: false } });
+  } });
+  await assert.rejects(client.getAllRoutes("19"), error => {
+    assert.equal(error.status, 503);
+    assert.equal(error.code, "IETT_PROXY_UNAVAILABLE");
+    assert.equal(error.details.retryAfterMs, 30000);
+    return true;
+  });
+});

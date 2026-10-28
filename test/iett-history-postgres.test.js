@@ -359,6 +359,61 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
     } finally { await restarted.close(); }
   });
 
+  await t.test("proxy unavailability pauses due days once, preserves attempts and resumes the queue after the cooldown", async () => {
+    await reset();
+    await repository.requestRange("2026-10-23", "2026-10-25");
+    const entries = [];
+    const calls = [];
+    let ready = false;
+    const collector = createHistoryCollector({ repository, logger: entry => entries.push(entry),
+      clock: () => Date.parse("2026-10-26T12:00:00Z"), client: { fetchDay: async date => {
+        calls.push(date);
+        if (!ready) throw Object.assign(new Error(), { code: "IETT_ARCHIVE_PROXY_UNAVAILABLE",
+          details: { phase: "proxy_probe", requestSent: false, retryAfterMs: 20000, proxySourceCode: "PROXY_COOLDOWN" } });
+        return [archiveRecord({ NKAYITGUNU: Number(date.replaceAll("-", "")) })];
+      } } });
+    const result = await collector.sync({ automatic: true, retryOnly: true });
+    assert.equal(result.result.deferred, 1);
+    assert.equal(result.result.failed, 0);
+    assert.deepEqual(calls, ["2026-10-23"]);
+    const status = await repository.status();
+    assert.ok(status.incomplete.every(day => day.status === "pending" && day.attempts === 0));
+    assert.ok(status.incomplete.every(day => new Date(day.nextAttemptAt).getTime() > Date.now() + 15000));
+    assert.ok((await repository.nextRetryAt()).getTime() < Date.now() + 25000);
+    assert.ok(entries.some(entry => entry.event === "history.waiting_for_proxy" && entry.retryAt));
+    assert.equal((await collector.sync({ automatic: true, retryOnly: true })).result.scheduled, 0);
+    ready = true;
+    await database.query("UPDATE iett_history_import_days SET next_attempt_at = now()");
+    const resumed = await collector.sync({ automatic: true, retryOnly: true });
+    assert.equal(resumed.result.success, 3);
+    assert.equal((await repository.status()).successfulDays, 3);
+  });
+
+  await t.test("proxy deferral retains a genuine earlier request attempt and a newer forced request", async () => {
+    await reset();
+    await repository.requestRange("2026-10-25", "2026-10-25");
+    await repository.withIngestionLock(async locked => {
+      const job = await locked.claimNextDay("2026-10-25", "2026-10-25");
+      await repository.requestRange(job.date, job.date, { force: true });
+      await locked.deferForProxy(job.date, { from: job.date, to: job.date, version: job.version, attempted: true,
+        error: { code: "IETT_ARCHIVE_PROXY_UNAVAILABLE", details: { retryAfterMs: 30000, phase: "proxy_probe" } } });
+      const state = (await locked.database.query("SELECT *, next_attempt_at <= now() AS due FROM iett_history_import_days")).rows[0];
+      assert.equal(state.status, "pending");
+      assert.equal(state.attempt_count, 1);
+      assert.equal(state.due, true);
+    });
+  });
+
+  await t.test("startup recovers old probe-only failures without shortening genuine archive failures", async () => {
+    await reset();
+    await repository.requestRange("2026-10-23", "2026-10-24");
+    await database.query(`UPDATE iett_history_import_days SET status = 'failed', next_attempt_at = now() + interval '1 hour',
+      last_error_details = jsonb_build_object('phase', CASE WHEN record_date = '2026-10-23' THEN 'proxy_probe' ELSE 'response_body' END)`);
+    await repository.requeueProxyFailures();
+    const rows = (await database.query("SELECT record_date::text AS date, status, next_attempt_at <= now() AS due FROM iett_history_import_days ORDER BY record_date")).rows;
+    assert.deepEqual(rows, [{ date: "2026-10-23", status: "pending", due: true }, { date: "2026-10-24", status: "failed", due: false }]);
+  });
+
   await t.test("history filters exact lines, paginates ties and reports missing days", async () => {
     await reset();
     await repository.withIngestionLock(async locked => {

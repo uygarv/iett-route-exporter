@@ -44,7 +44,7 @@ try {
       const outcome = await runtime.collector.sync({ from: values.from, to: values.to,
         days: values.days === undefined ? 30 : Number(values.days), force: values.force, signal: controller.signal });
       if (!outcome.locked) { console.log("Another history collector is already running."); process.exitCode = 2; }
-      else if (outcome.result.failed || outcome.result.empty) process.exitCode = 1;
+      else if (outcome.result.failed || outcome.result.empty || outcome.result.deferred) process.exitCode = 1;
     } finally {
       process.removeListener("SIGINT", abort);
       process.removeListener("SIGTERM", abort);

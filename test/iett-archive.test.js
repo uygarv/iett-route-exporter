@@ -190,3 +190,57 @@ test("download failures retain byte count and response_body phase, while decode 
     return true;
   });
 });
+
+test("proxy cooldown defers immediately without burning all three HTTP retries", async () => {
+  const entries = [];
+  let calls = 0;
+  const client = new IettArchiveClient({ delayMs: 0, logger: entry => entries.push(entry), fetchImpl: async () => {
+    calls++;
+    throw Object.assign(new Error("unavailable"), { code: "IBB_PROXY_UNAVAILABLE",
+      details: { proxySourceCode: "PROXY_COOLDOWN", retryAfterMs: 23000, requestSent: false, phase: "proxy_probe" } });
+  } });
+  await assert.rejects(client.fetchDay("2026-10-25"), error => {
+    assert.equal(error.code, "IETT_ARCHIVE_PROXY_UNAVAILABLE");
+    assert.equal(error.details.retryAfterMs, 23000);
+    assert.equal(error.details.attempts.length, 1);
+    assert.equal(error.details.attempts[0].requestSent, false);
+    return true;
+  });
+  assert.equal(calls, 1);
+  assert.equal(entries.at(-1).event, "history.request.deferred");
+  assert.equal(entries.at(-1).willRetry, false);
+});
+
+test("a genuine failed request before proxy unavailability stays visible in the attempt diagnostics", async () => {
+  let calls = 0;
+  const client = new IettArchiveClient({ delayMs: 0, sleepImpl: async () => {}, fetchImpl: async () => {
+    calls++;
+    if (calls === 1) throw Object.assign(new Error(), { code: "IBB_PROXY_REQUEST_FAILED",
+      details: { networkCode: "ECONNRESET", requestSent: true } });
+    throw Object.assign(new Error(), { code: "IBB_PROXY_UNAVAILABLE",
+      details: { retryAfterMs: 10000, requestSent: false, phase: "proxy_probe" } });
+  } });
+  await assert.rejects(client.fetchDay("2026-10-25"), error => {
+    assert.equal(error.code, "IETT_ARCHIVE_PROXY_UNAVAILABLE");
+    assert.deepEqual(error.details.attempts.map(attempt => attempt.requestSent), [true, false]);
+    return true;
+  });
+  assert.equal(calls, 2);
+});
+
+test("unavailable proxy discovery defers collection rather than failing each requested archive day", async () => {
+  let calls = 0;
+  const client = new IettArchiveClient({ delayMs: 0, fetchImpl: async () => {
+    calls++;
+    throw Object.assign(new Error(), { code: "IBB_PROXY_REQUEST_FAILED", details: {
+      proxySourceCode: "PROXY_SOURCE_FETCH_FAILED", phase: "proxy_discovery"
+    } });
+  } });
+  await assert.rejects(client.fetchDay("2026-10-25"), error => {
+    assert.equal(error.code, "IETT_ARCHIVE_PROXY_UNAVAILABLE");
+    assert.equal(error.details.retryAfterMs, 60000);
+    assert.equal(error.details.requestSent, false);
+    return true;
+  });
+  assert.equal(calls, 1);
+});

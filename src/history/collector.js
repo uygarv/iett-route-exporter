@@ -17,6 +17,7 @@ export function createHistoryCollector({ repository = new HistoryRepository(),
           const bounds = await locked.bounds();
           from = bounds.first_date ?? from;
           if (retryOnly && bounds.last_date) to = bounds.last_date;
+          if (!retryOnly) await locked.requeueProxyFailures();
         }
         await locked.enqueueRange(from, to, { force,
           ...(refresh ? { refreshSince: shiftDate(to, -2), refreshDate: today } : {}) });
@@ -49,6 +50,14 @@ export function createHistoryCollector({ repository = new HistoryRepository(),
               throw activeSignal.reason;
             }
             error.details = { phase, ...error.details };
+            if (error.code === "IETT_ARCHIVE_PROXY_UNAVAILABLE") {
+              const attempted = error.details.attempts?.some(entry => entry.requestSent !== false) ?? error.details.requestSent === true;
+              const waiting = await locked.deferForProxy(date, { from, to, error, version, attempted });
+              summary.deferred = 1;
+              logger({ event: "history.waiting_for_proxy", at: new Date(Number(clock())).toISOString(), date,
+                ...errorDiagnostics(error), ...waiting, durationMs: Number(clock()) - start });
+              break;
+            }
             await locked.markFailure(date, error, "failed", version);
             summary.failed += 1;
             logger({ event: "history.import", at: new Date(Number(clock())).toISOString(), date, status: "failed", ...errorDiagnostics(error),
