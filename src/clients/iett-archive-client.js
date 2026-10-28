@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { AppError } from "../shared/errors.js";
 import { dateOnly } from "../history/time.js";
-import { ibbFetch } from "./ibb-fetch.js";
+import { createIettFetch } from "./iett-fetch.js";
 import { readArchiveResponse } from "./iett-archive-parser.js";
 
 export { parseArchiveResponse } from "./iett-archive-parser.js";
@@ -15,7 +15,7 @@ function retryAfter(value, now) {
 }
 
 export class IettArchiveClient {
-  constructor({ fetchImpl = ibbFetch,
+  constructor({ useProxy, fetchImpl = createIettFetch({ scope: "archive", useProxy }),
     baseUrl = "https://api.ibb.gov.tr/iett/ibb/ibb360.asmx",
     timeoutMs = 120_000, delayMs = 1_000, clock = Date.now,
     sleepImpl = (ms, signal) => sleep(ms, undefined, { signal }) } = {}) {

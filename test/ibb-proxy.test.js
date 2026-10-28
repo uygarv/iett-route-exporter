@@ -60,6 +60,25 @@ function sourceRecord(url, extra = {}) {
   return { proxy: url, alive: true, ssl: true, ip_data: { countryCode: "TR" }, ...extra };
 }
 
+async function withProxySettings(settings, run) {
+  const keys = ["IBB_PROXY_SOURCE_URL", "IETT_CLIENT_USE_PROXY", "IETT_ARCHIVE_USE_PROXY"];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  await closeIbbProxyConnections();
+  try {
+    for (const key of keys) {
+      if (settings[key] === undefined) delete process.env[key];
+      else process.env[key] = settings[key];
+    }
+    return await run();
+  } finally {
+    await closeIbbProxyConnections();
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+}
+
 test("proxy source URL is optional and invalid configuration never exposes credentials", () => {
   assert.equal(readIbbProxySource(""), null);
   assert.equal(readIbbProxySource("https://api.example/list?country=tr"), "https://api.example/list?country=tr");
@@ -325,24 +344,85 @@ test("default route and archive clients discover the same proxy source lazily af
     publicUrl.password = "";
     response.end(JSON.stringify({ proxies: [sourceRecord(publicUrl.href)] }));
   }), t);
-  const previous = process.env.IBB_PROXY_SOURCE_URL;
-  await closeIbbProxyConnections();
-  t.after(async () => {
-    await closeIbbProxyConnections();
-    if (previous === undefined) delete process.env.IBB_PROXY_SOURCE_URL;
-    else process.env.IBB_PROXY_SOURCE_URL = previous;
+  await withProxySettings({}, async () => {
+    const routes = new IettClient({ baseUrl: origin });
+    const archive = new IettArchiveClient({ baseUrl: origin, delayMs: 0 });
+    process.env.IBB_PROXY_SOURCE_URL = source;
+    assert.deepEqual(await routes.getAllRoutes("19"), [{ route: "19_D_D0" }]);
+    assert.deepEqual(await routes.getRoutePin("19_D_D0"), [{ route: "19_D_D0" }]);
+    assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
+    assert.ok(tunnel.connections.length >= 1);
+    assert.deepEqual(paths, ["/GetAllRoute?rcode=19", "/GetRoutePinV2?q=19_D_D0", "/"]);
+    const connections = tunnel.connections.length;
+    await (await fetch(`${origin}direct-control`)).text();
+    assert.equal(tunnel.connections.length, connections, "global fetch and other providers stay direct");
   });
-  const routes = new IettClient({ baseUrl: origin });
-  const archive = new IettArchiveClient({ baseUrl: origin, delayMs: 0 });
-  process.env.IBB_PROXY_SOURCE_URL = source;
-  assert.deepEqual(await routes.getAllRoutes("19"), [{ route: "19_D_D0" }]);
-  assert.deepEqual(await routes.getRoutePin("19_D_D0"), [{ route: "19_D_D0" }]);
-  assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
-  assert.ok(tunnel.connections.length >= 1);
-  assert.deepEqual(paths, ["/GetAllRoute?rcode=19", "/GetRoutePinV2?q=19_D_D0", "/"]);
-  const connections = tunnel.connections.length;
-  await (await fetch(`${origin}direct-control`)).text();
-  assert.equal(tunnel.connections.length, connections, "global fetch and other providers stay direct");
+});
+
+test("real client requests respect every independent .env proxy combination and constructor override", async t => {
+  for (const configuration of [
+    { client: false, archive: false }, { client: false, archive: true },
+    { client: true, archive: false }, { client: true, archive: true },
+    { client: true, archive: true, override: false },
+    { client: false, archive: false, override: true }
+  ]) {
+    const routesOrigin = await listen(http.createServer((request, response) => response.end(JSON.stringify([{ route: "19_D_D0" }]))), t);
+    const archiveOrigin = await listen(http.createServer((request, response) => response.end(archiveXml())), t);
+    const tunnel = await proxy(t);
+    const proxyUrl = new URL(tunnel.url);
+    proxyUrl.username = "";
+    proxyUrl.password = "";
+    let discoveries = 0;
+    const sourceUrl = await listen(http.createServer((request, response) => {
+      discoveries++;
+      response.end(JSON.stringify({ proxies: [sourceRecord(proxyUrl.href)] }));
+    }), t);
+    await withProxySettings({ IBB_PROXY_SOURCE_URL: sourceUrl,
+      IETT_CLIENT_USE_PROXY: String(configuration.client), IETT_ARCHIVE_USE_PROXY: String(configuration.archive) }, async () => {
+      const routes = new IettClient({ baseUrl: routesOrigin, useProxy: configuration.override });
+      const archive = new IettArchiveClient({ baseUrl: archiveOrigin, useProxy: configuration.override, delayMs: 0 });
+      assert.deepEqual(await routes.getAllRoutes("19"), [{ route: "19_D_D0" }]);
+      assert.deepEqual(await routes.getRoutePin("19_D_D0"), [{ route: "19_D_D0" }]);
+      assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
+      const clientEnabled = configuration.override ?? configuration.client;
+      const archiveEnabled = configuration.override ?? configuration.archive;
+      const destinations = new Set(tunnel.connections.map(connection => connection.destination));
+      assert.equal(destinations.has(new URL(routesOrigin).host), clientEnabled);
+      assert.equal(destinations.has(new URL(archiveOrigin).host), archiveEnabled);
+      assert.equal(discoveries, clientEnabled || archiveEnabled ? 1 : 0, "enabled clients share discovery; direct clients never discover");
+      const tunnels = tunnel.connections.length;
+      await (await fetch(routesOrigin)).text();
+      assert.equal(tunnel.connections.length, tunnels, "unrelated global fetch stays direct");
+    });
+  }
+});
+
+test("disabled clients bypass invalid proxy configuration, and injected fetch implementations own transport", async t => {
+  const routesOrigin = await listen(http.createServer((request, response) => response.end("[]")), t);
+  const archiveOrigin = await listen(http.createServer((request, response) => response.end(archiveXml())), t);
+  await withProxySettings({ IBB_PROXY_SOURCE_URL: "invalid proxy source", IETT_CLIENT_USE_PROXY: "false", IETT_ARCHIVE_USE_PROXY: "false" }, async () => {
+    assert.deepEqual(await new IettClient({ baseUrl: routesOrigin }).getAllRoutes("19"), []);
+    assert.deepEqual(await new IettArchiveClient({ baseUrl: archiveOrigin, delayMs: 0 }).fetchDay("2026-10-25"), [archiveRecord()]);
+  });
+  await withProxySettings({ IETT_CLIENT_USE_PROXY: "invalid", IETT_ARCHIVE_USE_PROXY: "invalid" }, async () => {
+    let calls = 0;
+    const fetchImpl = async (url, options) => { calls++; return new Response(options.method === "POST" ? archiveXml() : "[]"); };
+    assert.deepEqual(await new IettClient({ fetchImpl }).getAllRoutes("19"), []);
+    assert.deepEqual(await new IettArchiveClient({ fetchImpl, delayMs: 0 }).fetchDay("2026-10-25"), [archiveRecord()]);
+    assert.equal(calls, 2);
+  });
+});
+
+test("explicit proxy enablement without a source fails closed before any upstream request", async t => {
+  let calls = 0;
+  const origin = await listen(http.createServer((request, response) => { calls++; response.end("[]"); }), t);
+  await withProxySettings({ IETT_CLIENT_USE_PROXY: "true", IETT_ARCHIVE_USE_PROXY: "true" }, async () => {
+    const routes = new IettClient({ baseUrl: origin });
+    const archive = new IettArchiveClient({ baseUrl: origin, delayMs: 0 });
+    await assert.rejects(routes.getAllRoutes("19"), { status: 503, code: "IBB_PROXY_CONFIGURATION_ERROR" });
+    await assert.rejects(archive.fetchDay("2026-10-25"), { status: 503, code: "IBB_PROXY_CONFIGURATION_ERROR" });
+  });
+  assert.equal(calls, 0);
 });
 
 test("archive authentication failure can advance to another configured proxy within the retry budget", async t => {

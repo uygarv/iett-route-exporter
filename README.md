@@ -73,12 +73,29 @@ these keys. HERE defaults to 2 requests/second, 2 concurrent requests and a
 20-second timeout. `HERE_REQUESTS_PER_SECOND` and `HERE_MAX_CONCURRENCY` configure
 its independent request queue.
 
-IBB/IETT route discovery, route pins and archive imports can discover Turkish
-proxies from ProxyScrape. Set the source URL in `.env`:
+IBB/IETT route discovery, route pins and archive imports share a proxy transport
+that discovers Turkish proxies from ProxyScrape. Each client can select direct
+or proxy access independently in `.env`:
 
 ```dotenv
 IBB_PROXY_SOURCE_URL=https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=json&country=tr
+IETT_CLIENT_USE_PROXY=true
+IETT_ARCHIVE_USE_PROXY=true
 ```
+
+`IETT_CLIENT_USE_PROXY` controls `IettClient` route discovery and route pins.
+`IETT_ARCHIVE_USE_PROXY` controls the archive worker and `history:sync` CLI.
+Set either to `false` to use direct access without fetching the proxy list.
+For example, `IETT_CLIENT_USE_PROXY=false` and `IETT_ARCHIVE_USE_PROXY=true`
+keep route queries direct while archive imports use proxies.
+
+Both settings accept `true`/`false` (case-insensitive). Unset/blank settings keep
+the previous behavior: use proxies if `IBB_PROXY_SOURCE_URL` is configured,
+otherwise connect directly. Explicit `true` requires a valid source URL;
+configuration errors return `IBB_PROXY_CONFIGURATION_ERROR` without sending an
+upstream request. Constructors also accept `useProxy: true/false`; it overrides
+the corresponding environment flag. An injected `fetchImpl` takes precedence
+over all proxy selection and retains control of the request transport.
 
 Discovery uses a direct connection with a 10-second timeout covering the entire
 response. The list is cached for 10 minutes and shared by concurrent requests.
@@ -94,9 +111,8 @@ and refresh is retried after a minute. Without a previous list the request fails
 it never silently falls back to direct IBB access. Removed proxy connections are
 closed after active requests finish. On worker/CLI shutdown, connections get one
 second to drain before pending tunnels and destination connections are destroyed.
-Empty/unset `IBB_PROXY_SOURCE_URL` explicitly
-uses direct access. TomTom, HERE and PostgreSQL connections are unaffected.
-Restart the API and worker after changing the source URL. Manual `IBB_PROXY_URLS`
+TomTom, HERE and PostgreSQL connections are unaffected.
+Restart the API and worker after changing proxy settings. Manual `IBB_PROXY_URLS`
 configuration is no longer used.
 
 ## Historical trips

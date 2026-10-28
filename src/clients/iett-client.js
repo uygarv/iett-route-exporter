@@ -1,5 +1,6 @@
 import { AppError } from "../shared/errors.js";
-import { ibbFetch, readIbbResponse } from "./ibb-fetch.js";
+import { readIbbResponse } from "./ibb-fetch.js";
+import { createIettFetch } from "./iett-fetch.js";
 
 const DEFAULT_BASE_URL = "https://iett.istanbul/tr/RouteStation/";
 
@@ -17,7 +18,8 @@ export function readRouteRecord(data, routeCode) {
 }
 
 export class IettClient {
-  constructor({ fetchImpl = ibbFetch, timeoutMs = 10_000, baseUrl = DEFAULT_BASE_URL,
+  constructor({ useProxy, fetchImpl = createIettFetch({ scope: "client", useProxy }),
+    timeoutMs = 10_000, baseUrl = DEFAULT_BASE_URL,
     cacheTtlMs = 86_400_000, clock = Date.now } = {}) {
     if (typeof fetchImpl !== "function") {
       throw new TypeError("A fetch implementation is required.");
