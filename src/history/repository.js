@@ -73,6 +73,13 @@ export class HistoryRepository {
     return result.rows.map(row => row.date);
   }
 
+  async nextRetryAt() {
+    const result = await this.database.query(`SELECT min(next_attempt_at) AS next_attempt_at
+      FROM iett_history_import_days WHERE status <> 'success'
+      AND record_date < (now() AT TIME ZONE 'Europe/Istanbul')::date`);
+    return result.rows[0].next_attempt_at;
+  }
+
   async markRunning(date) {
     await this.database.query(`UPDATE iett_history_import_days SET status = 'running', attempt_count = attempt_count + 1,
       started_at = now(), last_attempt_at = now() WHERE record_date = $1::date`, [date]);

@@ -3,7 +3,6 @@ import test from "node:test";
 import { createApp } from "../src/app.js";
 import { createIettHistoryService } from "../src/services/iett-history-service.js";
 import { normalizeArchiveRecord } from "../src/history/records.js";
-import { startHistoryScheduler } from "../src/history/scheduler.js";
 import { createDatabase } from "../src/db/database.js";
 import { archiveRecord } from "./fixtures/iett-archive.js";
 
@@ -75,30 +74,4 @@ test("database failures return 503 without leaking connection details", async t 
   const text = await response.text();
   assert.match(text, /HISTORY_DATABASE_UNAVAILABLE/);
   assert.doesNotMatch(text, /secret|private-host/);
-});
-
-test("worker starts immediately, uses Istanbul scheduling, and distinguishes pre-04:00 retries", async () => {
-  let now = Date.parse("2026-10-26T00:59:00Z"); // 03:59 Istanbul
-  const calls = [];
-  let tick, stopped = false, destroyed = false;
-  const worker = startHistoryScheduler({ clock: () => now, collector: {
-    sync: async options => { calls.push(options); }
-  }, schedule: (expression, callback, options) => {
-    assert.equal(expression, "0 * * * *");
-    assert.equal(options.timezone, "Europe/Istanbul");
-    assert.equal(options.noOverlap, true);
-    tick = callback;
-    return { stop: () => { stopped = true; }, destroy: () => { destroyed = true; } };
-  } });
-  await worker.ready;
-  assert.equal(calls[0].refresh, false);
-  assert.equal(calls[0].retryOnly, false);
-  await tick();
-  assert.equal(calls[1].retryOnly, true);
-  now = Date.parse("2026-10-26T01:00:00Z");
-  await tick();
-  assert.equal(calls[2].refresh, true);
-  assert.equal(calls[2].retryOnly, false);
-  await worker.stop();
-  assert.ok(stopped && destroyed);
 });

@@ -1,29 +1,104 @@
 import cron from "node-cron";
 import { localDate, TIME_ZONE } from "./time.js";
 
-export function startHistoryScheduler({ collector, clock = Date.now, schedule = cron.schedule,
+export function startHistoryScheduler({ collector, repository, clock = Date.now, schedule = cron.schedule,
+  setTimer = setTimeout, clearTimer = clearTimeout,
   logger = entry => console.log(JSON.stringify(entry)) }) {
   const controller = new AbortController();
   let current;
+  let planning;
+  let timer;
+  let planVersion = 0;
+  let dailyPending = false;
   const hour = new Intl.DateTimeFormat("en-GB", { timeZone: TIME_ZONE, hour: "2-digit", hourCycle: "h23" });
-  async function run(startup = false) {
-    if (current || controller.signal.aborted) return;
-    const afterFour = Number(hour.format(clock())) >= 4;
-    current = collector.sync({ automatic: true, retryOnly: !startup && !afterFour,
-      refresh: afterFour, signal: controller.signal }).catch(error => {
-      if (!controller.signal.aborted) logger({ event: "history.worker.error", date: localDate(clock()), code: error.code ?? "HISTORY_WORKER_FAILED" });
-    });
-    try { await current; } finally { current = undefined; }
+
+  function cancelTimer() {
+    planVersion++;
+    if (timer !== undefined) clearTimer(timer);
+    timer = undefined;
   }
-  // After 04:00 the daily refresh is enqueued once, recorded durably per day.
-  const task = schedule("0 * * * *", () => run(), { timezone: TIME_ZONE, noOverlap: true });
-  const ready = run(true);
+  function logError(error, fallback) {
+    if (!controller.signal.aborted) {
+      logger({ event: "history.worker.error", date: localDate(clock()), code: error.code ?? fallback });
+    }
+  }
+  async function planNextRetry(retryDelay = 0, kind = "retry") {
+    const version = ++planVersion;
+    if (controller.signal.aborted || current) return;
+    let delay = retryDelay;
+    let runCollector = retryDelay > 0;
+    if (!retryDelay) {
+      try {
+        const next = await repository.nextRetryAt();
+        const at = next == null ? Infinity : new Date(next).getTime();
+        if (Number.isNaN(at)) throw new Error("Invalid history retry timestamp.");
+        const wait = Math.max(1, at - Number(clock()));
+        // Refresh discovery of DB changes (e.g. CLI imports) every minute.
+        // Known deadlines within that window keep their exact millisecond time.
+        delay = Math.min(wait, 60_000);
+        runCollector = wait <= 60_000;
+      } catch (error) {
+        logError(error, "HISTORY_RETRY_SCHEDULE_FAILED");
+        delay = 60_000;
+        runCollector = true;
+      }
+    }
+    if (version !== planVersion || controller.signal.aborted || current) return;
+    timer = setTimer(() => {
+      timer = undefined;
+      if (runCollector) return run(kind);
+      planning = planNextRetry(0, kind);
+      return planning;
+    }, delay);
+  }
+  function run(kind = "retry") {
+    if (controller.signal.aborted) return Promise.resolve();
+    if (current) {
+      if (kind === "daily") dailyPending = true;
+      return current;
+    }
+    cancelTimer();
+    let retryDelay = 0;
+    let nextKind = "retry";
+    current = Promise.resolve().then(async () => {
+      do {
+        dailyPending = false;
+        retryDelay = 0;
+        nextKind = "retry";
+        try {
+          const refresh = kind === "daily" || kind === "startup" && Number(hour.format(clock())) >= 4;
+          const outcome = await collector.sync({ automatic: true, retryOnly: kind === "retry",
+            refresh, signal: controller.signal });
+          if (outcome?.locked === false) {
+            retryDelay = 30_000;
+            nextKind = kind;
+          }
+        } catch (error) {
+          logError(error, "HISTORY_WORKER_FAILED");
+          retryDelay = 60_000;
+          nextKind = kind;
+        }
+        kind = "daily";
+      } while (dailyPending && !controller.signal.aborted);
+    }).finally(() => {
+      current = undefined;
+      planning = planNextRetry(retryDelay, nextKind);
+      return planning;
+    });
+    return current;
+  }
+  // Daily intake is independent from retry deadlines. If busy at 04:00,
+  // queue the daily cycle and run it as soon as the current cycle finishes.
+  const task = schedule("0 4 * * *", () => run("daily"), { timezone: TIME_ZONE, noOverlap: true });
+  const ready = run("startup");
   return {
     ready,
     async stop() {
       task.stop();
       controller.abort();
+      cancelTimer();
       await current;
+      await planning;
       task.destroy();
     }
   };

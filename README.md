@@ -127,9 +127,28 @@ npm run history:worker
 ```
 
 The worker runs separately from the API. It catches up on startup, imports new
-days at 04:00 Europe/Istanbul, refreshes the last three days, and retries failed
-or empty days hourly. Requests run sequentially with a default 1,000 ms delay
-after each response. Previously collected data is retained indefinitely.
+days at 04:00 Europe/Istanbul, and refreshes the last three days. Failed or empty
+days become eligible again one hour after failure. A timer follows the earliest
+`nextAttemptAt`, so retries do not wait for the next clock hour. If an import is
+already running, newly due days are picked up when that cycle finishes; imports
+never overlap. Database changes from other collectors are discovered at least
+once per minute while idle. The 04:00 daily cycle is queued if the worker is busy.
+Requests run sequentially with a default 1,000 ms delay after each response.
+Previously collected data is retained indefinitely.
+
+To retry a day manually without waiting for its `nextAttemptAt`:
+
+```bash
+cd ~/iett-route-exporter
+pm2 stop iett-history-worker
+npm run history:sync -- --from 2026-09-27 --to 2026-09-27
+pm2 start iett-history-worker
+```
+
+The same command accepts a longer `--from`/`--to` range. Successful days are
+skipped; `--force` is only needed to re-fetch them. Restart the worker even if the
+manual sync exits unsuccessfully. Stopping the worker first releases its advisory
+lock; otherwise the CLI refuses to run while another collector holds that lock.
 
 Archive XML is decoded and parsed incrementally from the response stream. Only
 the JSON result and one day's parsed records are retained; the full XML document

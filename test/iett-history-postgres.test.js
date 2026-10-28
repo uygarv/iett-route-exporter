@@ -113,6 +113,24 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
     assert.equal((await repository.withIngestionLock(async () => "released")).result, "released");
   });
 
+  await t.test("retry scheduling selects the earliest unfinished completed day and skips successful/future days", async () => {
+    await reset();
+    await repository.enqueueRange("2026-09-26", "2026-09-28");
+    await database.query(`UPDATE iett_history_import_days SET status = 'failed',
+      next_attempt_at = now() + interval '37 minutes 3.118 seconds' WHERE record_date = '2026-09-26'`);
+    const first = (await database.query(`UPDATE iett_history_import_days SET status = 'empty',
+      next_attempt_at = now() + interval '12 minutes 17.456 seconds' WHERE record_date = '2026-09-27'
+      RETURNING next_attempt_at`)).rows[0].next_attempt_at;
+    await database.query(`UPDATE iett_history_import_days SET status = 'success', next_attempt_at = now()
+      WHERE record_date = '2026-09-28'`);
+    await database.query(`INSERT INTO iett_history_import_days(record_date)
+      VALUES ((now() AT TIME ZONE 'Europe/Istanbul')::date), ((now() AT TIME ZONE 'Europe/Istanbul')::date + 1)`);
+    assert.equal((await repository.nextRetryAt()).getTime(), first.getTime());
+    await database.query("UPDATE iett_history_import_days SET status = 'success' WHERE record_date < '2026-10-01'");
+    assert.equal(await repository.nextRetryAt(), null);
+    await reset();
+  });
+
   await t.test("a lost database session aborts ingestion and releases its lock for recovery", async () => {
     let started;
     const ready = new Promise(resolve => { started = resolve; });

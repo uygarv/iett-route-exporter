@@ -5,7 +5,7 @@ import { closeIbbProxyConnections } from "../clients/ibb-fetch.js";
 
 dotenv.config({ quiet: true });
 const runtime = createHistoryRuntime();
-const worker = startHistoryScheduler({ collector: runtime.collector });
+const worker = startHistoryScheduler({ collector: runtime.collector, repository: runtime.repository });
 let stopping = false;
 async function shutdown() {
   if (stopping) return;
