@@ -16,6 +16,7 @@ const explanations = {
   CERT_HAS_EXPIRED: "The TLS certificate has expired.",
   IETT_ARCHIVE_TIMEOUT: "The archive request deadline expired.",
   IBB_PROXY_CONFIGURATION_ERROR: "The proxy configuration is missing or invalid.",
+  IBB_TIMEOUT_CONFIGURATION_ERROR: "The connection or header timeout configuration is invalid.",
   IETT_ARCHIVE_INVALID_XML: "IETT returned invalid archive XML.",
   IETT_ARCHIVE_INVALID_JSON: "IETT returned invalid archive JSON.",
   IETT_ARCHIVE_SOAP_FAULT: "IETT returned a SOAP fault.",
@@ -44,7 +45,7 @@ export function diagnosticDetails(error) {
   for (const key of ["networkCode", "proxySourceCode", "databaseCode"]) {
     if (typeof details[key] === "string" && codePattern.test(details[key])) result[key] = details[key];
   }
-  for (const key of ["proxyIndex", "proxyCount", "proxyStatus", "proxySourceStatus", "status", "retryAfterMs", "timeoutMs", "bytesReceived"]) {
+  for (const key of ["proxyIndex", "proxyCount", "proxyStatus", "proxySourceStatus", "status", "retryAfterMs", "timeoutMs", "connectTimeoutMs", "headersTimeoutMs", "bytesReceived"]) {
     if (Number.isSafeInteger(details[key]) && details[key] >= 0) result[key] = details[key];
   }
   if (phases.has(details.phase)) result.phase = details.phase;

@@ -142,7 +142,7 @@ test("aborted proxy requests preserve cancellation without advancing the list", 
   const request = createIbbFetch({ source: memorySource(["http://one.example/", "http://two.example/"]),
     agentFactory: url => ({ url, close: async () => {} }), fetchImpl: async (url, options) => {
       selected.push(options.dispatcher.url);
-      if (options.signal) { controller.abort(reason); throw reason; }
+      if (selected.length === 1) { controller.abort(reason); throw reason; }
       return new Response("ok");
     } });
   await assert.rejects(request("https://api.ibb.gov.tr/", { signal: controller.signal }), reason);
@@ -613,4 +613,56 @@ test("cancelling a request waiting on discovery does not cancel discovery for ot
   await assert.rejects(pending, { name: "AbortError" });
   finish();
   assert.equal(await (await other).text(), "ok");
+});
+
+test("a stalled CONNECT hits the short headers deadline, rotates, and preserves the archive retry budget", async t => {
+  const stalled = http.createServer();
+  stalled.on("connect", () => {});
+  const stalledUrl = await listen(stalled, t);
+  const origin = await listen(http.createServer((req, res) => res.end(archiveXml())), t);
+  const working = await proxy(t);
+  const entries = [];
+  const request = createIbbFetch({ source: memorySource([stalledUrl, working.url]),
+    headersTimeoutMs: 80, connectTimeoutMs: 50, closeTimeoutMs: 40 });
+  t.after(() => request.close());
+  const archive = new IettArchiveClient({ baseUrl: origin, fetchImpl: request,
+    timeoutMs: 2000, delayMs: 0, sleepImpl: async () => {}, logger: entry => entries.push(entry) });
+  assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
+  const failure = entries.find(entry => entry.event === "history.request.failed");
+  assert.equal(failure.networkCode, "UND_ERR_HEADERS_TIMEOUT");
+  assert.equal(failure.proxy, new URL(stalledUrl).origin);
+  assert.equal(failure.headersTimeoutMs, 80);
+  assert.equal(failure.willRetry, true);
+  assert.equal(working.connections.length, 1);
+});
+
+test("real proxy and direct downloads outlive the short header timer", async t => {
+  const xml = archiveXml();
+  const origin = await listen(http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/xml" });
+    res.write(xml.slice(0, 40));
+    setTimeout(() => res.end(xml.slice(40)), 400);
+  }), t);
+  const tunnel = await proxy(t);
+  for (const urls of [[], [tunnel.url]]) {
+    const request = createIbbFetch({ source: memorySource(urls), headersTimeoutMs: 200 });
+    t.after(() => request.close());
+    const archive = new IettArchiveClient({ baseUrl: origin, fetchImpl: request, timeoutMs: 2000, delayMs: 0 });
+    assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
+  }
+});
+
+test("TCP/TLS connection limits reach both proxy connectors and the direct connector", async t => {
+  const idle = await listen(net.createServer(() => {}), t);
+  const tunnel = await proxy(t);
+  const target = idle.replace("http:", "https:");
+  for (const urls of [[], [tunnel.url], [target]]) {
+    const request = createIbbFetch({ source: memorySource(urls), connectTimeoutMs: 40, headersTimeoutMs: 3000 });
+    t.after(() => request.close());
+    await assert.rejects(request(target), error => {
+      assert.equal(error.details.networkCode, "UND_ERR_CONNECT_TIMEOUT");
+      assert.equal(error.details.connectTimeoutMs, 40);
+      return true;
+    });
+  }
 });

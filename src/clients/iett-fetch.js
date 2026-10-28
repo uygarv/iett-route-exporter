@@ -1,5 +1,5 @@
 import { AppError } from "../shared/errors.js";
-import { ibbFetch } from "./ibb-fetch.js";
+import { ibbFetch, directIbbFetch } from "./ibb-fetch.js";
 import { readIbbProxySource } from "./ibb-proxy-source.js";
 
 const PROXY_SETTINGS = Object.freeze({
@@ -35,7 +35,7 @@ export function readIettProxyPolicy(scope, { useProxy, env = process.env } = {})
 // Resolve on first request, after dotenv is loaded. Both clients reuse the
 // shared discovery/rotation/pool layer; disabling one never touches that layer.
 export function createIettFetch({ scope, useProxy,
-  directFetch = globalThis.fetch, proxyFetch = ibbFetch } = {}) {
+  directFetch = directIbbFetch, proxyFetch = ibbFetch } = {}) {
   let transport;
   let selected;
   const request = (input, options) => {

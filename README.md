@@ -106,6 +106,19 @@ selects the next proxy for the next attempt/request;
 a working proxy is reused across list refreshes while it remains listed.
 Archive imports retain their three-attempt limit and delays.
 
+IETT direct and proxy connections use a 5-second TCP/TLS connection timeout and
+a separate 15-second deadline from request dispatch to response headers,
+including proxy CONNECT negotiation. The header timer stops when headers arrive;
+it does not cut off large response bodies. Configure these shared transport limits
+with `IBB_CONNECT_TIMEOUT_MS=5000` and `IBB_HEADERS_TIMEOUT_MS=15000` (positive
+integer milliseconds). Proxy discovery keeps its own 10-second deadline. Archive
+requests retain `IETT_HISTORY_TIMEOUT_MS=120000` for the entire attempt, including
+discovery, connection, headers and body. Connection/header failures rotate to the
+next proxy under the existing retry policy. Timeout logs include the configured
+connection/header limits and the underlying network code. These settings do not
+change global fetch or other providers' transports. Restart API/worker after
+changing them; unset settings use these defaults.
+
 If discovery fails or returns no usable proxies, the previous list is retained
 and refresh is retried after a minute. Without a previous list the request fails;
 it never silently falls back to direct IBB access. Removed proxy connections are

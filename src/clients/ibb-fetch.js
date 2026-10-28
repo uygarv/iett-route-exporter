@@ -1,7 +1,8 @@
-import { fetch as proxyFetch, ProxyAgent, Pool } from "undici";
+import { fetch as proxyFetch, ProxyAgent, Pool, Agent } from "undici";
 import { createIbbProxySource, readIbbProxySource } from "./ibb-proxy-source.js";
 import { AppError } from "../shared/errors.js";
 import { diagnosticDetails } from "../shared/error-diagnostics.js";
+import { fetchIbbHeaders, readIbbTimeouts } from "./ibb-timeouts.js";
 
 const responseFailures = new WeakMap();
 
@@ -26,14 +27,17 @@ export function ibbResponseDetails(response) {
   return responseFailures.get(response)?.details ?? {};
 }
 
-function createProxyAgent(uri) {
+function createProxyAgent(uri, { connectTimeoutMs, headersTimeoutMs }) {
   const pools = new Set();
   const poolFactory = (origin, options) => {
-    const pool = new Pool(origin, options);
+    const pool = new Pool(origin, { ...options, headersTimeout: headersTimeoutMs });
     pools.add(pool);
     return pool;
   };
-  const agent = new ProxyAgent({ uri, clientFactory: poolFactory, factory: poolFactory });
+  // ProxyAgent builds separate connectors for the proxy and destination TLS.
+  // Pool.connectTimeout alone does not configure those custom connectors.
+  const agent = new ProxyAgent({ uri, clientFactory: poolFactory, factory: poolFactory,
+    proxyTls: { timeout: connectTimeoutMs }, requestTls: { timeout: connectTimeoutMs } });
   return {
     dispatch: (...args) => agent.dispatch(...args),
     // Drain pools together: ProxyAgent's sequential close can wait forever on
@@ -67,9 +71,12 @@ async function waitForSource(pending, signal) {
 // working proxy is reused. Configured proxies never fall back to direct access.
 export function createIbbFetch({ sourceUrl = readIbbProxySource(),
   source = createIbbProxySource({ sourceUrl }),
-  directFetch = globalThis.fetch, fetchImpl = proxyFetch,
-  agentFactory = createProxyAgent, closeTimeoutMs = 1_000 } = {}) {
+  directFetch, fetchImpl = proxyFetch,
+  connectTimeoutMs, headersTimeoutMs,
+  agentFactory = createProxyAgent, directAgentFactory = options => new Agent(options), closeTimeoutMs = 1_000 } = {}) {
   if (!Number.isFinite(closeTimeoutMs) || closeTimeoutMs <= 0) throw new RangeError("Proxy close timeout must be positive.");
+  const limits = readIbbTimeouts({ connectTimeoutMs, headersTimeoutMs });
+  let directAgent;
   const agents = new Map();
   const retiring = new Map();
   let selected;
@@ -97,14 +104,24 @@ export function createIbbFetch({ sourceUrl = readIbbProxySource(),
     const urls = await waitForSource(source.get(), options.signal);
     options.signal?.throwIfAborted();
     if (closed) throw new Error("The IBB proxy transport is closed.");
-    if (!urls.length) return directFetch(input, options);
+    if (!urls.length) {
+      try {
+        if (!directFetch) directAgent ??= directAgentFactory({ connect: { timeout: limits.connectTimeoutMs } });
+        return await fetchIbbHeaders(directFetch ?? proxyFetch, input,
+          { ...options, ...(!directFetch ? { dispatcher: directAgent } : {}) }, limits.headersTimeoutMs);
+      } catch (error) {
+        options.signal?.throwIfAborted();
+        error.details = { ...diagnosticDetails(error), transport: "direct", ...limits };
+        throw error;
+      }
+    }
     for (const [url, agent] of agents) {
       if (!urls.includes(url)) { agents.delete(url); retire(agent); }
     }
     if (!urls.includes(selected)) selected = urls[0];
     const url = selected;
     const index = urls.indexOf(url);
-    const details = { transport: "proxy", proxy: new URL(url).origin, proxyIndex: index + 1, proxyCount: urls.length };
+    const details = { transport: "proxy", proxy: new URL(url).origin, proxyIndex: index + 1, proxyCount: urls.length, ...limits };
     let failed = false;
     function advance() {
       const cancelled = options.signal?.aborted && options.signal.reason?.name !== "TimeoutError";
@@ -113,20 +130,21 @@ export function createIbbFetch({ sourceUrl = readIbbProxySource(),
       if (selected === url) selected = urls[(index + 1) % urls.length];
     }
     try {
-      if (!agents.has(url)) agents.set(url, agentFactory(url));
-      const response = await fetchImpl(input, { ...options, dispatcher: agents.get(url) });
+      if (!agents.has(url)) agents.set(url, agentFactory(url, limits));
+      const response = await fetchIbbHeaders(fetchImpl, input, { ...options, dispatcher: agents.get(url) }, limits.headersTimeoutMs);
       if (response.status === 429 || response.status >= 500) advance();
       responseFailures.set(response, { advance, details });
       return response;
     } catch (error) {
       // A caller cancellation preserves selection; a request deadline advances
       // it so a proxy with a stalled CONNECT response cannot trap every retry.
-      const timedOut = options.signal?.aborted && options.signal.reason?.name === "TimeoutError";
+      const timedOut = error.name === "TimeoutError" || options.signal?.aborted && options.signal.reason?.name === "TimeoutError";
       if (!timedOut) options.signal?.throwIfAborted();
       advance();
       if (timedOut) {
-        options.signal.reason.details = { ...details, phase: "response_headers", ...diagnosticDetails(error) };
-        throw options.signal.reason;
+        const reason = options.signal?.aborted ? options.signal.reason : error;
+        reason.details = { ...details, phase: "response_headers", ...diagnosticDetails(error) };
+        throw reason;
       }
       const failure = new Error("The IBB proxy request failed.");
       failure.code = "IBB_PROXY_REQUEST_FAILED";
@@ -149,6 +167,7 @@ export function createIbbFetch({ sourceUrl = readIbbProxySource(),
     closed = true;
     closing = Promise.all([
       source.close(),
+      ...(directAgent ? [closeAgent(directAgent)] : []),
       ...[...agents.values()].map(agent => closeAgent(agent)),
       ...[...retiring].map(([agent, pending]) => closeAgent(agent, pending))
     ]).then(() => { agents.clear(); retiring.clear(); });
@@ -160,13 +179,21 @@ export function createIbbFetch({ sourceUrl = readIbbProxySource(),
 // Read configuration on first use, after the server/worker has loaded dotenv.
 // This also keeps library/module imports free of network/configuration effects.
 let defaultFetch;
+let defaultDirectFetch;
 export function ibbFetch(input, options) {
   defaultFetch ??= createIbbFetch();
   return defaultFetch(input, options);
 }
 
+export function directIbbFetch(input, options) {
+  defaultDirectFetch ??= createIbbFetch({ sourceUrl: null });
+  return defaultDirectFetch(input, options);
+}
+
 export async function closeIbbProxyConnections() {
   const current = defaultFetch;
+  const direct = defaultDirectFetch;
   defaultFetch = undefined;
-  await current?.close();
+  defaultDirectFetch = undefined;
+  await Promise.all([current?.close(), direct?.close()]);
 }
