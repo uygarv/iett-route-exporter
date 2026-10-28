@@ -1,4 +1,5 @@
 import { AppError } from "../shared/errors.js";
+import { ibbFetch, readIbbResponse } from "./ibb-fetch.js";
 
 const DEFAULT_BASE_URL = "https://iett.istanbul/tr/RouteStation/";
 
@@ -16,7 +17,7 @@ export function readRouteRecord(data, routeCode) {
 }
 
 export class IettClient {
-  constructor({ fetchImpl = globalThis.fetch, timeoutMs = 10_000, baseUrl = DEFAULT_BASE_URL,
+  constructor({ fetchImpl = ibbFetch, timeoutMs = 10_000, baseUrl = DEFAULT_BASE_URL,
     cacheTtlMs = 86_400_000, clock = Date.now } = {}) {
     if (typeof fetchImpl !== "function") {
       throw new TypeError("A fetch implementation is required.");
@@ -69,43 +70,45 @@ export class IettClient {
     url.searchParams.set(parameter, value);
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-
-    let response;
+    const timeout = setTimeout(() => controller.abort(new DOMException("The IETT request timed out.", "TimeoutError")), this.timeoutMs);
 
     try {
-      response = await this.fetchImpl(url, {
+      const response = await this.fetchImpl(url, {
         headers: {
           accept: "application/json"
         },
         signal: controller.signal
       });
+
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new AppError(502, "IETT_BAD_STATUS", "IETT returned an unsuccessful response.", {
+          endpoint: path,
+          status: response.status
+        });
+      }
+
+      try {
+        return await readIbbResponse(response, "json");
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        throw new AppError(502, "IETT_INVALID_JSON", "IETT returned invalid JSON.", {
+          endpoint: path
+        });
+      }
     } catch (error) {
-      const timedOut = error?.name === "AbortError";
+      if (error instanceof AppError) throw error;
+      const timedOut = controller.signal.aborted || error?.name === "AbortError";
+      const proxyAuthFailed = error.code === "IBB_PROXY_REQUEST_FAILED" && error.details?.proxyStatus === 407;
 
       throw new AppError(
         502,
-        timedOut ? "IETT_TIMEOUT" : "IETT_REQUEST_FAILED",
-        timedOut ? "The IETT request timed out." : "The IETT request failed.",
-        { endpoint: path }
+        timedOut ? "IETT_TIMEOUT" : proxyAuthFailed ? "IETT_PROXY_AUTH_FAILED" : "IETT_REQUEST_FAILED",
+        timedOut ? "The IETT request timed out." : proxyAuthFailed ? "The IBB proxy rejected authentication." : "The IETT request failed.",
+        { endpoint: path, ...(error.code === "IBB_PROXY_REQUEST_FAILED" ? error.details : {}) }
       );
     } finally {
       clearTimeout(timeout);
-    }
-
-    if (!response.ok) {
-      throw new AppError(502, "IETT_BAD_STATUS", "IETT returned an unsuccessful response.", {
-        endpoint: path,
-        status: response.status
-      });
-    }
-
-    try {
-      return await response.json();
-    } catch {
-      throw new AppError(502, "IETT_INVALID_JSON", "IETT returned invalid JSON.", {
-        endpoint: path
-      });
     }
   }
 }

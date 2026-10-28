@@ -2,6 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { AppError } from "../shared/errors.js";
 import { dateOnly } from "../history/time.js";
+import { ibbFetch, readIbbResponse } from "./ibb-fetch.js";
 
 const SOAP_ACTION = "http://tempuri.org/GetIettArsivGorev_json";
 const parser = new XMLParser({ removeNSPrefix: true, parseTagValue: false, trimValues: false });
@@ -31,7 +32,7 @@ function retryAfter(value, now) {
 }
 
 export class IettArchiveClient {
-  constructor({ fetchImpl = globalThis.fetch,
+  constructor({ fetchImpl = ibbFetch,
     baseUrl = "https://api.ibb.gov.tr/iett/ibb/ibb360.asmx",
     timeoutMs = 120_000, delayMs = 1_000, clock = Date.now,
     sleepImpl = (ms, signal) => sleep(ms, undefined, { signal }) } = {}) {
@@ -60,6 +61,7 @@ export class IettArchiveClient {
       } catch (error) {
         signal?.throwIfAborted();
         const retryable = ["IETT_ARCHIVE_TIMEOUT", "IETT_ARCHIVE_REQUEST_FAILED"].includes(error.code)
+          || error.code === "IETT_ARCHIVE_PROXY_AUTH_FAILED" && error.details?.proxyCount > 1
           || error.details?.status === 429 || error.details?.status >= 500;
         if (!retryable || attempt >= 2) throw error;
         this.nextRequestAt = Math.max(this.nextRequestAt,
@@ -70,7 +72,7 @@ export class IettArchiveClient {
 
   async #request(date, signal) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(new DOMException("The IETT archive request timed out.", "TimeoutError")), this.timeoutMs);
     const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
     try {
       const response = await this.fetchImpl(this.baseUrl, {
@@ -79,7 +81,7 @@ export class IettArchiveClient {
         body: `<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><GetIettArsivGorev_json xmlns="http://tempuri.org/"><Tarih>${date.replaceAll("-", "")}</Tarih></GetIettArsivGorev_json></soap:Body></soap:Envelope>`,
         signal: requestSignal
       });
-      const xml = await response.text();
+      const xml = await readIbbResponse(response, "text");
       if (!response.ok) {
         throw new AppError(502, "IETT_ARCHIVE_BAD_STATUS", "IETT returned an unsuccessful archive response.", {
           status: response.status, retryAfterMs: retryAfter(response.headers.get("retry-after"), Number(this.clock()))
@@ -89,8 +91,12 @@ export class IettArchiveClient {
     } catch (error) {
       signal?.throwIfAborted();
       if (error instanceof AppError) throw error;
+      if (error.code === "IBB_PROXY_REQUEST_FAILED" && error.details?.proxyStatus === 407) {
+        throw new AppError(502, "IETT_ARCHIVE_PROXY_AUTH_FAILED", "The IBB proxy rejected authentication.", error.details);
+      }
       throw new AppError(502, controller.signal.aborted ? "IETT_ARCHIVE_TIMEOUT" : "IETT_ARCHIVE_REQUEST_FAILED",
-        controller.signal.aborted ? "The IETT archive request timed out." : "The IETT archive request failed.");
+        controller.signal.aborted ? "The IETT archive request timed out." : "The IETT archive request failed.",
+        error.code === "IBB_PROXY_REQUEST_FAILED" ? error.details : undefined);
     } finally {
       clearTimeout(timeout);
       this.nextRequestAt = Number(this.clock()) + this.delayMs;

@@ -4,6 +4,7 @@ import { migrate } from "../db/migrate.js";
 import { createHistoryRuntime } from "../history/runtime.js";
 import { localDate, shiftDate } from "../history/time.js";
 import { AppError } from "../shared/errors.js";
+import { closeIbbProxyConnections } from "../clients/ibb-fetch.js";
 
 dotenv.config({ quiet: true });
 
@@ -47,5 +48,6 @@ try {
       ? error.message : "The history command failed. Check configuration and database access." }));
   process.exitCode = 1;
 } finally {
+  await closeIbbProxyConnections();
   await runtime?.database.end();
 }

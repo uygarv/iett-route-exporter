@@ -40,6 +40,11 @@ export function createHistoryCollector({ repository = new HistoryRepository(),
             activeSignal.throwIfAborted();
             summary.failed += 1;
             logger({ event: "history.import", date, status: "failed", code: error.code ?? "HISTORY_IMPORT_FAILED",
+              ...(error.details?.proxyIndex ? { proxyIndex: error.details.proxyIndex,
+                ...(error.details.proxyStatus ? { proxyStatus: error.details.proxyStatus } : {}),
+                ...(error.details.networkCode ? { networkCode: error.details.networkCode } : {}) } : {}),
+              ...(error.details?.proxySourceCode ? { proxySourceCode: error.details.proxySourceCode,
+                ...(error.details.proxySourceStatus ? { proxySourceStatus: error.details.proxySourceStatus } : {}) } : {}),
               durationMs: Number(clock()) - start });
           }
         }

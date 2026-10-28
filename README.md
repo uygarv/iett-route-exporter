@@ -73,6 +73,32 @@ these keys. HERE defaults to 2 requests/second, 2 concurrent requests and a
 20-second timeout. `HERE_REQUESTS_PER_SECOND` and `HERE_MAX_CONCURRENCY` configure
 its independent request queue.
 
+IBB/IETT route discovery, route pins and archive imports can discover Turkish
+proxies from ProxyScrape. Set the source URL in `.env`:
+
+```dotenv
+IBB_PROXY_SOURCE_URL=https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=json&country=tr
+```
+
+Discovery uses a direct connection with a 10-second timeout covering the entire
+response. The list is cached for 10 minutes and shared by concurrent requests.
+Only live Turkish HTTP/HTTPS proxies marked as supporting HTTPS are used;
+SOCKS entries are skipped. Higher uptime is preferred, then lower latency.
+A connection failure, response-body interruption/timeout, HTTP 429 or HTTP 5xx
+selects the next proxy for the next attempt/request;
+a working proxy is reused across list refreshes while it remains listed.
+Archive imports retain their three-attempt limit and delays.
+
+If discovery fails or returns no usable proxies, the previous list is retained
+and refresh is retried after a minute. Without a previous list the request fails;
+it never silently falls back to direct IBB access. Removed proxy connections are
+closed after active requests finish. On worker/CLI shutdown, connections get one
+second to drain before pending tunnels and destination connections are destroyed.
+Empty/unset `IBB_PROXY_SOURCE_URL` explicitly
+uses direct access. TomTom, HERE and PostgreSQL connections are unaffected.
+Restart the API and worker after changing the source URL. Manual `IBB_PROXY_URLS`
+configuration is no longer used.
+
 ## Historical trips
 
 Configure `DATABASE_URL`, then migrate and import the last 30 completed Istanbul
