@@ -12,6 +12,8 @@ import { testStatisticsPostgres } from "./fixtures/iett-statistics-postgres.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { IettArchiveClient } from "../src/clients/iett-archive-client.js";
+import { ProxyHealthRepository } from "../src/clients/proxy-health-repository.js";
+import { createProxyHealth } from "../src/clients/proxy-health.js";
 
 const url = process.env.TEST_DATABASE_URL;
 
@@ -23,7 +25,7 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
   t.after(() => database.end());
 
   await t.test("migration verifies every legacy field and rolls back on a mismatch before dropping raw_payload", async () => {
-    await database.query("DROP TABLE IF EXISTS iett_history_trips, iett_history_import_days, iett_history_schema_migrations");
+    await database.query("DROP TABLE IF EXISTS iett_history_trips, iett_history_import_days, iett_proxy_health, iett_history_schema_migrations");
     await database.query(await readFile(new URL("../src/db/migrations/001_iett_history.sql", import.meta.url), "utf8"));
     await database.query(`CREATE TABLE iett_history_schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
       INSERT INTO iett_history_schema_migrations(name) VALUES ('001_iett_history.sql')`);
@@ -50,7 +52,6 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
         row.vehicle_door_number, row.task_status, row.started_at, row.ended_at,
         row.planned_started_at, row.adjusted_started_at, JSON.stringify(raw)]);
     }
-    // Simulate an encoding bug: the database must reject the entire migration.
     await database.query(`CREATE FUNCTION public.history_test_corrupt_extra() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN NEW.extra_fields := '{}'; RETURN NEW; END $$;
       CREATE TRIGGER history_test_corrupt_extra BEFORE UPDATE ON iett_history_trips
@@ -65,7 +66,7 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
     } finally {
       await database.query("DROP TRIGGER history_test_corrupt_extra ON iett_history_trips; DROP FUNCTION public.history_test_corrupt_extra()");
     }
-    assert.deepEqual(await migrate(database), ["002_compact_history_payload.sql", "003_history_route_statistics_index.sql", "004_history_queue_diagnostics.sql"]);
+    assert.deepEqual(await migrate(database), ["002_compact_history_payload.sql", "003_history_route_statistics_index.sql", "004_history_queue_diagnostics.sql", "005_proxy_health.sql"]);
     assert.deepEqual(await migrate(database), []);
     const rows = (await database.query("SELECT t.*, record_date::text AS record_date FROM iett_history_trips t ORDER BY source_id")).rows;
     assert.equal(rows.length, legacy.length);
@@ -299,6 +300,63 @@ test("history PostgreSQL integration", { skip: !url }, async t => {
     assert.ok(state.lastAttemptAt);
     assert.equal(entries[0].event, "history.import.started");
     assert.doesNotMatch(JSON.stringify({ entries, state }), /private-password|secret/);
+  });
+
+  await t.test("proxy health persists successes, speed, cooldown and stale-event ordering independently of trip data", async () => {
+    await database.query("TRUNCATE iett_proxy_health");
+    const metrics = new ProxyHealthRepository(database);
+    const now = Date.now() - 1000;
+    const base = { proxy: "http://working.example:8080", origin: "https://api.ibb.gov.tr" };
+    await metrics.record({ ...base, kind: "probe", outcome: "success", at: now, durationMs: 25 });
+    await metrics.record({ ...base, kind: "request", outcome: "success", at: now + 10,
+      durationMs: 100, bytes: 10000, downloadBps: 100000 });
+    let row = (await metrics.load(base.origin, [base.proxy]))[0];
+    assert.equal(row.request_successes, "1");
+    assert.equal(row.probe_successes, "1");
+    assert.equal(row.transfer_bytes, "10000");
+    assert.equal(row.last_probe_latency_ms, 25);
+    assert.equal(row.last_download_bps, 100000);
+    assert.equal(row.last_transfer_duration_ms, 100);
+    await metrics.record({ ...base, kind: "request", outcome: "failure", at: now + 20, durationMs: 50,
+      bytes: 1000, code: "ECONNRESET", cooldownUntil: now + 60000 });
+    await metrics.record({ ...base, kind: "probe", outcome: "success", at: now - 100, durationMs: 1 });
+    row = (await metrics.load(base.origin, [base.proxy]))[0];
+    assert.equal(row.last_error_code, "ECONNRESET");
+    assert.equal(row.consecutive_failures, 1);
+    assert.equal(row.failures, "1");
+    assert.equal(row.last_probe_latency_ms, 25);
+    assert.equal(row.last_transfer_bytes, "1000");
+    assert.equal(row.last_download_bps, 100000);
+    assert.equal(row.cooldown_until.getTime(), now + 60000);
+    assert.equal((await metrics.load("https://iett.istanbul", [base.proxy])).length, 0);
+    assert.equal((await metrics.load(base.origin, ["http://unlisted.example"])).length, 0);
+    await database.query(`INSERT INTO iett_proxy_health(proxy_url, target_origin, last_event_at)
+      VALUES ('http://expired.example', $1, now() - interval '25 hours')`, [base.origin]);
+    await metrics.prune();
+    assert.equal((await database.query("SELECT count(*)::int AS count FROM iett_proxy_health")).rows[0].count, 1);
+  });
+
+  await t.test("a fresh process restores a healthy proxy from PostgreSQL and skips cooldown/unlisted candidates", async () => {
+    await database.query("TRUNCATE iett_proxy_health");
+    const now = Date.now();
+    const origin = "https://api.ibb.gov.tr";
+    const make = () => createProxyHealth({ logger: () => {}, repository: new ProxyHealthRepository(
+      createDatabase({ connectionString: url, connectionTimeoutMs: 300, statementTimeoutMs: 500 })) });
+    const first = make();
+    const listed = ["http://failing.example/", "http://working.example/", "http://removed.example/"];
+    await first.select([listed[1]], origin, undefined, async () => {});
+    first.success(listed[1], origin, { durationMs: 250, bytes: 100000 });
+    first.failure(listed[0], origin, { durationMs: 10, error: { code: "ECONNRESET" } });
+    first.success(listed[2], origin, { durationMs: 1, bytes: 1000000 });
+    await first.close();
+    const restarted = make();
+    try {
+      assert.equal(await restarted.select(listed.slice(0, 2), origin, undefined,
+        () => assert.fail("fresh persisted health must avoid a probe after restart")), listed[1]);
+      const row = (await database.query("SELECT * FROM iett_proxy_health WHERE proxy_url = 'http://working.example'")).rows[0];
+      assert.equal(row.last_download_bps, 400000);
+      assert.ok(row.last_request_success_at.getTime() >= now);
+    } finally { await restarted.close(); }
   });
 
   await t.test("history filters exact lines, paginates ties and reports missing days", async () => {

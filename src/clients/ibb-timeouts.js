@@ -10,9 +10,6 @@ export function readIbbTimeouts({ connectTimeoutMs, headersTimeoutMs, env = proc
   }
   return limits;
 }
-
-// fetch() resolves at response headers. Cancel this timer there, while keeping
-// the caller's signal attached to the body for its longer total deadline.
 export async function fetchIbbHeaders(fetchImpl, input, options, headersTimeoutMs) {
   options.signal?.throwIfAborted();
   const controller = new AbortController();

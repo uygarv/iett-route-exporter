@@ -10,6 +10,7 @@ import { readIbbProxySource, parseProxySource, createIbbProxySource } from "../s
 import { IettClient } from "../src/clients/iett-client.js";
 import { IettArchiveClient } from "../src/clients/iett-archive-client.js";
 import { archiveXml, archiveRecord } from "./fixtures/iett-archive.js";
+import { createProxyHealth } from "../src/clients/proxy-health.js";
 
 async function listen(server, t) {
   const sockets = new Set();
@@ -219,8 +220,6 @@ test("retryable HTTP responses rotate proxies and retain Retry-After and archive
 });
 
 test("shutdown releases a real proxy stalled during CONNECT and lets the process exit", { timeout: 4000 }, async () => {
-  // Isolate the regression: the broken implementation leaves Undici's internal
-  // CONNECT request alive even after aborting fetch and cannot exit naturally.
   const script = `
     import assert from 'node:assert/strict';
     import http from 'node:http';
@@ -342,8 +341,10 @@ test("real CONNECT failover preserves SOAP body, proxy authentication and archiv
 
 test("default route and archive clients discover the same proxy source lazily after construction", async t => {
   const paths = [];
+  const probes = [];
   const origin = await listen(http.createServer((request, response) => {
-    paths.push(request.url);
+    if (request.method === "HEAD") probes.push(request.url);
+    else paths.push(request.url);
     assert.equal(request.headers["proxy-authorization"], undefined);
     response.end(request.method === "POST" ? archiveXml() : JSON.stringify([{ route: "19_D_D0" }]));
   }), t);
@@ -364,6 +365,7 @@ test("default route and archive clients discover the same proxy source lazily af
     assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
     assert.ok(tunnel.connections.length >= 1);
     assert.deepEqual(paths, ["/GetAllRoute?rcode=19", "/GetRoutePinV2?q=19_D_D0", "/"]);
+    assert.deepEqual(probes, ["/GetAllRoute?rcode=19"], "the warm proxy is shared for the same origin without repeat probes");
     const connections = tunnel.connections.length;
     await (await fetch(`${origin}direct-control`)).text();
     assert.equal(tunnel.connections.length, connections, "global fetch and other providers stay direct");
@@ -473,7 +475,7 @@ test("CONNECT 407 gives safe route/archive diagnostics without retrying invalid 
   assert.equal(tunnel.connections.length, 2);
 });
 
-test("discovery coalesces concurrent requests, caches for ten minutes and refreshes on expiry", async t => {
+test("discovery coalesces concurrent requests, caches for two minutes and refreshes on expiry", async t => {
   let now = 0;
   let calls = 0;
   let finish;
@@ -490,10 +492,10 @@ test("discovery coalesces concurrent requests, caches for ten minutes and refres
   assert.equal(calls, 1);
   finish();
   assert.deepEqual(await Promise.all(pending), Array(3).fill(["http://proxy1.example/"]));
-  now = 599_999;
+  now = 119_999;
   assert.deepEqual(await source.get(), ["http://proxy1.example/"]);
   assert.equal(calls, 1);
-  now = 600_000;
+  now = 120_000;
   assert.deepEqual(await source.get(), ["http://proxy2.example/"]);
   assert.equal(calls, 2);
 });
@@ -665,4 +667,99 @@ test("TCP/TLS connection limits reach both proxy connectors and the direct conne
       return true;
     });
   }
+});
+
+test("health probes use HEAD before SOAP, reuse warm selection, and persist only actual transfer throughput", async t => {
+  const methods = [];
+  const xml = archiveXml(Array.from({ length: 20 }, (_, ID) => archiveRecord({ ID })));
+  const origin = await listen(http.createServer((req, res) => {
+    methods.push(req.method);
+    if (req.method === "HEAD") { res.end(); return; }
+    res.end(xml);
+  }), t);
+  const bad = await proxy(t, { reject: true });
+  const good = await proxy(t);
+  const events = [];
+  const health = createProxyHealth({ logger: () => {}, repository: {
+    load: async () => [], prune: async () => {}, close: async () => {}, record: async event => { events.push(event); }
+  } });
+  const request = createIbbFetch({ source: memorySource([bad.url, good.url]), health });
+  t.after(() => request.close());
+  const archive = new IettArchiveClient({ baseUrl: origin, fetchImpl: request, delayMs: 0 });
+  assert.equal((await archive.fetchDay("2026-10-25")).length, 20);
+  assert.equal((await archive.fetchDay("2026-10-25")).length, 20);
+  await request.close();
+  assert.deepEqual(methods, ["HEAD", "POST", "POST"]);
+  const completed = events.filter(event => event.kind === "request" && event.outcome === "success");
+  assert.equal(completed.length, 2);
+  assert.ok(completed.every(event => event.bytes === Buffer.byteLength(xml) && event.downloadBps > 0));
+  assert.ok(events.some(event => event.kind === "probe" && event.outcome === "failure"));
+  assert.doesNotMatch(JSON.stringify(events), /proxy-user|secret:password/);
+});
+
+test("HEAD fallback requests one byte and cancels at headers, never measuring speed through a large test download", async t => {
+  const methods = [];
+  const origin = await listen(http.createServer((req, res) => {
+    methods.push({ method: req.method, range: req.headers.range });
+    if (req.method === "HEAD") { res.writeHead(405); res.end(); return; }
+    if (req.method === "GET") {
+      res.writeHead(200);
+      res.write("first");
+      return;
+    }
+    res.end(archiveXml());
+  }), t);
+  const good = await proxy(t);
+  const health = createProxyHealth({ logger: () => {}, probeTimeoutMs: 200 });
+  const request = createIbbFetch({ source: memorySource([good.url]), health });
+  t.after(() => request.close());
+  const archive = new IettArchiveClient({ baseUrl: origin, fetchImpl: request, delayMs: 0 });
+  assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
+  assert.deepEqual(methods.map(entry => entry.method), ["HEAD", "GET", "POST"]);
+  assert.equal(methods[1].range, "bytes=0-0");
+});
+
+test("the real ASMX probe contract uses a tiny WSDL GET because HEAD is unsupported", async t => {
+  let cancelled = false;
+  let probed = 0;
+  const health = createProxyHealth({ logger: () => {} });
+  const request = createIbbFetch({ source: memorySource(["http://proxy.example/"]), health,
+    agentFactory: () => ({ close: async () => {} }), fetchImpl: async (input, options) => {
+      if (options.method === "POST") return new Response(archiveXml());
+      probed++;
+      assert.equal(String(input), "https://api.ibb.gov.tr/iett/ibb/ibb360.asmx?wsdl");
+      assert.equal(options.method, "GET");
+      assert.equal(options.headers.range, "bytes=0-0");
+      return new Response(new ReadableStream({ cancel() { cancelled = true; } }));
+    } });
+  t.after(() => request.close());
+  const archive = new IettArchiveClient({ fetchImpl: request, delayMs: 0 });
+  assert.deepEqual(await archive.fetchDay("2026-10-25"), [archiveRecord()]);
+  assert.equal(probed, 1);
+  assert.equal(cancelled, true);
+});
+
+test("HTTP 200 followed by an interrupted archive records a failed partial transfer, not a successful proxy request", async t => {
+  const events = [];
+  const health = createProxyHealth({ logger: () => {}, repository: {
+    load: async () => [], prune: async () => {}, close: async () => {}, record: async event => { events.push(event); }
+  } });
+  const request = createIbbFetch({ source: memorySource(["http://proxy.example/"]), health,
+    agentFactory: () => ({ close: async () => {} }), fetchImpl: async (input, options) => {
+      if (options.method === "HEAD") return new Response(null);
+      return new Response(new ReadableStream({ pull(controller) {
+        if (!this.sent) { this.sent = true; controller.enqueue(new TextEncoder().encode("<partial>")); }
+        else controller.error(new TypeError("terminated", { cause: Object.assign(new Error(), { code: "ECONNRESET" }) }));
+      } }));
+    } });
+  t.after(() => request.close());
+  const archive = new IettArchiveClient({ baseUrl: "https://test.example/", fetchImpl: request, delayMs: 0, sleepImpl: async () => {} });
+  await assert.rejects(archive.fetchDay("2026-10-25"));
+  await request.close();
+  const transfers = events.filter(event => event.kind === "request");
+  assert.equal(transfers.length, 1);
+  assert.equal(transfers[0].outcome, "failure");
+  assert.equal(transfers[0].bytes, 9);
+  assert.equal(transfers[0].code, "ECONNRESET");
+  assert.equal(transfers[0].downloadBps, undefined);
 });

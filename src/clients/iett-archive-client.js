@@ -33,7 +33,6 @@ export class IettArchiveClient {
   fetchDay(date, { signal } = {}) {
     dateOnly(date);
     const pending = this.tail.then(() => this.#fetchDay(date, signal));
-    // Serialize requests without retaining the last day's records while idle.
     this.tail = pending.then(() => {}, () => {});
     return pending;
   }

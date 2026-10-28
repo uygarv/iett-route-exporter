@@ -35,8 +35,6 @@ export function startHistoryScheduler({ collector, repository, clock = Date.now,
         const at = next == null ? Infinity : new Date(next).getTime();
         if (Number.isNaN(at)) throw new Error("Invalid history retry timestamp.");
         const wait = Math.max(1, at - Number(clock()));
-        // Refresh discovery of DB changes (e.g. CLI imports) every minute.
-        // Known deadlines within that window keep their exact millisecond time.
         delay = Math.min(wait, 60_000);
         runCollector = wait <= 60_000;
       } catch (error) {
@@ -89,8 +87,6 @@ export function startHistoryScheduler({ collector, repository, clock = Date.now,
     });
     return current;
   }
-  // Daily intake is independent from retry deadlines. If busy at 04:00,
-  // queue the daily cycle and run it as soon as the current cycle finishes.
   const task = schedule("0 4 * * *", () => run("daily"), { timezone: TIME_ZONE, noOverlap: true });
   const ready = run("startup");
   return {

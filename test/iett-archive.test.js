@@ -38,7 +38,6 @@ test("compact records preserve new fields, exceptions, value types and missing v
   for (const raw of cases) {
     const row = normalizeArchiveRecord(raw, "2026-10-25");
     assert.deepEqual(archiveSourceRecord(row), raw);
-    // Simulate pg's BIGINT/string and timestamp/Date decoding as well as JSONB storage.
     const persisted = JSON.parse(JSON.stringify(row));
     persisted.source_id = String(BigInt(row.source_id));
     if (row.archive_task_id !== null) persisted.archive_task_id = String(BigInt(row.archive_task_id));

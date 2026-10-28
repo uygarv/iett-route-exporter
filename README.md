@@ -73,61 +73,6 @@ these keys. HERE defaults to 2 requests/second, 2 concurrent requests and a
 20-second timeout. `HERE_REQUESTS_PER_SECOND` and `HERE_MAX_CONCURRENCY` configure
 its independent request queue.
 
-IBB/IETT route discovery, route pins and archive imports share a proxy transport
-that discovers Turkish proxies from ProxyScrape. Each client can select direct
-or proxy access independently in `.env`:
-
-```dotenv
-IBB_PROXY_SOURCE_URL=https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=json&country=tr
-IETT_CLIENT_USE_PROXY=true
-IETT_ARCHIVE_USE_PROXY=true
-```
-
-`IETT_CLIENT_USE_PROXY` controls `IettClient` route discovery and route pins.
-`IETT_ARCHIVE_USE_PROXY` controls the archive worker and `history:sync` CLI.
-Set either to `false` to use direct access without fetching the proxy list.
-For example, `IETT_CLIENT_USE_PROXY=false` and `IETT_ARCHIVE_USE_PROXY=true`
-keep route queries direct while archive imports use proxies.
-
-Both settings accept `true`/`false` (case-insensitive). Unset/blank settings keep
-the previous behavior: use proxies if `IBB_PROXY_SOURCE_URL` is configured,
-otherwise connect directly. Explicit `true` requires a valid source URL;
-configuration errors return `IBB_PROXY_CONFIGURATION_ERROR` without sending an
-upstream request. Constructors also accept `useProxy: true/false`; it overrides
-the corresponding environment flag. An injected `fetchImpl` takes precedence
-over all proxy selection and retains control of the request transport.
-
-Discovery uses a direct connection with a 10-second timeout covering the entire
-response. The list is cached for 10 minutes and shared by concurrent requests.
-Only live Turkish HTTP/HTTPS proxies marked as supporting HTTPS are used;
-SOCKS entries are skipped. Higher uptime is preferred, then lower latency.
-A connection failure, response-body interruption/timeout, HTTP 429 or HTTP 5xx
-selects the next proxy for the next attempt/request;
-a working proxy is reused across list refreshes while it remains listed.
-Archive imports retain their three-attempt limit and delays.
-
-IETT direct and proxy connections use a 5-second TCP/TLS connection timeout and
-a separate 15-second deadline from request dispatch to response headers,
-including proxy CONNECT negotiation. The header timer stops when headers arrive;
-it does not cut off large response bodies. Configure these shared transport limits
-with `IBB_CONNECT_TIMEOUT_MS=5000` and `IBB_HEADERS_TIMEOUT_MS=15000` (positive
-integer milliseconds). Proxy discovery keeps its own 10-second deadline. Archive
-requests retain `IETT_HISTORY_TIMEOUT_MS=120000` for the entire attempt, including
-discovery, connection, headers and body. Connection/header failures rotate to the
-next proxy under the existing retry policy. Timeout logs include the configured
-connection/header limits and the underlying network code. These settings do not
-change global fetch or other providers' transports. Restart API/worker after
-changing them; unset settings use these defaults.
-
-If discovery fails or returns no usable proxies, the previous list is retained
-and refresh is retried after a minute. Without a previous list the request fails;
-it never silently falls back to direct IBB access. Removed proxy connections are
-closed after active requests finish. On worker/CLI shutdown, connections get one
-second to drain before pending tunnels and destination connections are destroyed.
-TomTom, HERE and PostgreSQL connections are unaffected.
-Restart the API and worker after changing proxy settings. Manual `IBB_PROXY_URLS`
-configuration is no longer used.
-
 ## Historical trips
 
 Configure `DATABASE_URL`, then migrate and queue the last 30 completed Istanbul
@@ -173,48 +118,6 @@ pm2 stop iett-history-worker
 npm run history:sync -- --from 2026-09-28 --to 2026-09-28 --wait
 pm2 start iett-history-worker
 ```
-
-Only `--wait` requires stopping the worker to release the ingestion lock. Restart
-it even if the foreground command exits unsuccessfully. Foreground failures or
-empty responses exit with code 1; a busy ingestion lock exits with code 2. Queue
-mode success means jobs were saved, not that downloads succeeded. Today and
-future dates are rejected in both modes. Requests remain sequential to respect
-IETT pacing and avoid holding multiple large days in memory; each day can make
-three attempts with a 120-second deadline per attempt plus backoff.
-
-The worker logs timestamps and progress (`history.import.started`,
-`history.request.started`, `history.request.headers`, `history.request.downloaded`,
-`history.import.saving`, `history.import`). Each failed request logs the attempt,
-duration, retry decision, phase, HTTP/CONNECT status, network cause codes, proxy
-origin/index/count and timeout when available. Raw library messages, credentials,
-source records and database URLs are never logged. The latest day's diagnostic,
-including its three request attempts, is saved in `last_error_details` and shown
-as `errorDetails` by `history:status`. Historical errors are not reconstructed;
-their next attempt will populate details. Graceful cancellation puts the day back
-in the queue rather than recording an opaque error 20.
-
-Archive XML is decoded and parsed incrementally from the response stream. Only
-the JSON result and one day's parsed records are retained; the full XML document
-and an XML object tree are not built. Source fields, XML entities and CDATA are
-preserved. The request timeout still covers downloading the entire response.
-The PM2 worker's memory restart threshold is `1G`.
-
-The memory regression test imports three generated 55,532-record days with a
-256 MiB V8 heap limit and checks every record's contents:
-
-```bash
-node --test test/iett-archive-memory.test.js
-```
-
-```bash
-curl 'http://localhost:3000/api/iett/history/19?from=2026-10-01&to=2026-10-25&limit=500'
-npm run history:status
-```
-
-* Optional filters are `from`, `to` (inclusive `YYYY-MM-DD`), `routeCode`, `limit`
-(1–1000, default 500), and `cursor`. 
-* Follow `pagination.nextCursor` for subsequent pages. 
-* Other endpoints work without a database.
 
 ## Route statistics
 

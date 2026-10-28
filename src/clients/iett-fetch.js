@@ -17,7 +17,6 @@ export function readIettProxyPolicy(scope, { useProxy, env = process.env } = {})
     if (value && !["true", "false"].includes(value)) {
       throw new AppError(503, "IBB_PROXY_CONFIGURATION_ERROR", `${setting} must be true or false.`);
     }
-    // Preserve existing installations that configure only the source URL.
     enabled = value ? value === "true" : Boolean(env.IBB_PROXY_SOURCE_URL?.trim());
   }
   if (!enabled) return false;
@@ -31,9 +30,6 @@ export function readIettProxyPolicy(scope, { useProxy, env = process.env } = {})
   }
   return true;
 }
-
-// Resolve on first request, after dotenv is loaded. Both clients reuse the
-// shared discovery/rotation/pool layer; disabling one never touches that layer.
 export function createIettFetch({ scope, useProxy,
   directFetch = directIbbFetch, proxyFetch = ibbFetch } = {}) {
   let transport;

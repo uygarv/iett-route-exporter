@@ -35,7 +35,6 @@ export class HistoryRepository {
     try {
       locked = (await client.query("SELECT pg_try_advisory_lock(182885, 1) AS locked")).rows[0].locked;
       if (!locked) return { locked: false };
-      // A previous process can only leave 'running' rows after losing its lock.
       await client.query("UPDATE iett_history_import_days SET status = 'pending' WHERE status = 'running'");
       return { locked: true, result: await run(new HistoryRepository(client), disconnected.signal) };
     } finally {
@@ -66,9 +65,6 @@ export class HistoryRepository {
         AND refresh_requested_on IS DISTINCT FROM $3::date`, [refreshSince, to, refreshDate]);
     }
   }
-
-  // The CLI only writes durable work; it never waits for the ingestion lock.
-  // A version prevents an in-flight import from consuming a newer force request.
   async requestRange(from, to, { force = false } = {}) {
     const result = await this.database.query(`INSERT INTO iett_history_import_days AS d(record_date)
       SELECT day::date FROM generate_series($1::date, $2::date, interval '1 day') AS day
@@ -125,8 +121,6 @@ export class HistoryRepository {
     await this.database.query(`UPDATE iett_history_import_days SET status = 'pending', next_attempt_at = now()
       WHERE record_date = $1::date AND status = 'running'`, [date]);
   }
-
-  // Called on the dedicated client held by withIngestionLock.
   async saveDay(date, records, version) {
     if (!records.length) {
       await this.markFailure(date, { code: "IETT_ARCHIVE_EMPTY" }, "empty", version);

@@ -2,8 +2,7 @@ import { readFileSync } from "node:fs";
 import pg from "pg";
 import { AppError } from "../shared/errors.js";
 
-// Construction and module imports never open a database connection.
-export function createDatabase({ connectionString, caFile, poolSize = 5 } = {}) {
+export function createDatabase({ connectionString, caFile, poolSize = 5, connectionTimeoutMs = 10_000, statementTimeoutMs } = {}) {
   let pool;
   function getPool() {
     if (pool) return pool;
@@ -20,7 +19,8 @@ export function createDatabase({ connectionString, caFile, poolSize = 5 } = {}) 
     pool = new pg.Pool({
       connectionString: url,
       max: poolSize,
-      connectionTimeoutMillis: 10_000,
+      connectionTimeoutMillis: connectionTimeoutMs,
+      ...(statementTimeoutMs ? { statement_timeout: statementTimeoutMs } : {}),
       idleTimeoutMillis: 30_000,
       application_name: "iett-history",
       ...(certificate ? { ssl: { ca: readFileSync(certificate, "utf8"), rejectUnauthorized: true } } : {})

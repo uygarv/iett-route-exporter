@@ -1,7 +1,6 @@
-// Log structured diagnostics, never raw library messages/stacks: CONNECT errors
-// and database errors can embed URLs, passwords, SQL parameters or source data.
+
 const codePattern = /^(?:[A-Z][A-Z0-9_]{0,79}|[0-9][A-Z0-9]{4})$/;
-const phases = new Set(["proxy_discovery", "response_headers", "response_body", "decode", "database", "cancelled"]);
+const phases = new Set(["proxy_discovery", "proxy_probe", "response_headers", "response_body", "decode", "database", "cancelled"]);
 const explanations = {
   UND_ERR_CONNECT_TIMEOUT: "TCP/TLS connection timed out.",
   UND_ERR_HEADERS_TIMEOUT: "Timed out waiting for response headers.",
@@ -23,6 +22,9 @@ const explanations = {
   HISTORY_IMPORT_CANCELLED: "The import was cancelled; the day remains queued.",
   IETT_ARCHIVE_EMPTY: "IETT returned an empty archive.",
   PROXY_SOURCE_EMPTY: "The proxy source returned no usable proxies.",
+  PROXY_PROBE_FAILED: "The tested proxies could not reach IBB.",
+  PROXY_PROBE_TIMEOUT: "The short IBB proxy probe timed out.",
+  PROXY_COOLDOWN: "Listed proxies are temporarily cooling down after failures.",
   PROXY_SOURCE_BAD_STATUS: "The proxy list provider returned an HTTP error.",
   PROXY_SOURCE_INVALID_RESPONSE: "The proxy list provider returned an invalid response.",
   PROXY_SOURCE_FETCH_FAILED: "Fetching the proxy list failed.",
@@ -37,6 +39,8 @@ export function diagnosticDetails(error) {
     if (!cause || typeof cause !== "object" || seen.has(cause) || depth >= 6 || seen.size >= 16) return;
     seen.add(cause);
     if (typeof cause.code === "string" && codePattern.test(cause.code)) codes.push(cause.code);
+    const proxyStatus = /Proxy response \((\d{3})\)/.exec(cause.message ?? "")?.[1];
+    if (proxyStatus) result.proxyStatus = Number(proxyStatus);
     visit(cause.cause, depth + 1);
     if (Array.isArray(cause.errors)) for (const nested of cause.errors.slice(0, 6)) visit(nested, depth + 1);
   }
@@ -56,7 +60,7 @@ export function diagnosticDetails(error) {
     try {
       const url = new URL(details.proxy);
       if (["http:", "https:"].includes(url.protocol)) result.proxy = url.origin;
-    } catch { /* A diagnostic must never hide the original failure. */ }
+    } catch {}
   }
   const nestedCodes = [...new Set([...(Array.isArray(details.causeCodes) ? details.causeCodes : [])
     .filter(value => typeof value === "string" && codePattern.test(value)), ...codes])].slice(0, 16);

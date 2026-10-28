@@ -18,8 +18,6 @@ test("three full archive days remain lossless within a 256 MiB V8 heap", { timeo
   const count = 55_532;
   const hash = createHash("sha256");
   const [header, footer] = archiveXml([]).split("[]");
-  // Generate a realistic day on disk without allocating the whole fixture in
-  // the test runner. The child receives the same network-sized byte chunks.
   await pipeline(Readable.from((async function* () {
     yield `${header}[`;
     let batch = [];

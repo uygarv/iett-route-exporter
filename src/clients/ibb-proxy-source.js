@@ -17,9 +17,6 @@ function sourceError(code, status) {
   error.details = { proxySourceCode: code, ...(status ? { proxySourceStatus: status } : {}) };
   return error;
 }
-
-// ProxyScrape mixes HTTP and SOCKS records. Undici's ProxyAgent uses HTTP
-// CONNECT, so require a live HTTP(S) proxy with verified HTTPS support.
 export function parseProxySource(data) {
   if (!data || !Array.isArray(data.proxies)) throw sourceError("PROXY_SOURCE_INVALID_RESPONSE");
   const candidates = [];
@@ -34,7 +31,7 @@ export function parseProxySource(data) {
       candidates.push({ url: url.href,
         uptime: Number.isFinite(entry.uptime) ? entry.uptime : 0,
         latency: Number.isFinite(entry.average_timeout) ? entry.average_timeout : Infinity });
-    } catch { /* Ignore unusable records, not the entire provider response. */ }
+    } catch {}
   }
   candidates.sort((a, b) => b.uptime - a.uptime || a.latency - b.latency);
   const urls = [...new Set(candidates.map(entry => entry.url))];
@@ -43,7 +40,7 @@ export function parseProxySource(data) {
 }
 
 export function createIbbProxySource({ sourceUrl = readIbbProxySource(), fetchImpl = globalThis.fetch,
-  clock = Date.now, ttlMs = 600_000, retryMs = 60_000, timeoutMs = 10_000 } = {}) {
+  clock = Date.now, ttlMs = 120_000, retryMs = 60_000, timeoutMs = 10_000 } = {}) {
   const url = readIbbProxySource(sourceUrl);
   for (const value of [ttlMs, retryMs, timeoutMs]) {
     if (!Number.isFinite(value) || value <= 0) throw new RangeError("Proxy source intervals must be positive.");
@@ -64,7 +61,6 @@ export function createIbbProxySource({ sourceUrl = readIbbProxySource(), fetchIm
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         loading = (async () => {
           try {
-            // Discovery always uses direct fetch, never the proxy being discovered.
             const response = await fetchImpl(url, { headers: { accept: "application/json" }, signal: controller.signal });
             if (!response.ok) {
               await response.body?.cancel();

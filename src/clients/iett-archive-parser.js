@@ -1,6 +1,6 @@
 import sax from "sax";
 import { AppError } from "../shared/errors.js";
-import { readIbbResponse } from "./ibb-fetch.js";
+import { readIbbResponse, recordIbbResponseBytes } from "./ibb-fetch.js";
 
 const RESULT_PATH = ["Envelope", "Body", "GetIettArsivGorev_jsonResponse", "GetIettArsivGorev_jsonResult"];
 const CHUNK_SIZE = 64 * 1024;
@@ -14,8 +14,6 @@ function invalidJson() {
 }
 
 function createArchiveParser() {
-  // SAX emits bounded text chunks instead of building an XML object tree.
-  // Keep position tracking enabled: sax uses it to flush large text buffers.
   const parser = sax.parser(true, { xmlns: true, strictEntities: true });
   const stack = [];
   let parts = [];
@@ -40,7 +38,6 @@ function createArchiveParser() {
   };
   return {
     write(text) {
-      // A caller may supply an entire document or a very large network chunk.
       for (let offset = 0; offset < text.length; offset += CHUNK_SIZE) {
         parser.write(text.slice(offset, offset + CHUNK_SIZE));
       }
@@ -67,13 +64,12 @@ export function parseArchiveResponse(xml) {
 }
 
 export async function readArchiveResponse(response, { signal, onChunk = () => {} } = {}) {
-  // Small injected test clients may provide only text(); production fetch
-  // responses always use the incremental UTF-8/ReadableStream path below.
   if (!response.body) return parseArchiveResponse(await readIbbResponse(response, "text"));
   return readIbbResponse(response, async () => {
     const parser = createArchiveParser();
     const decoder = new TextDecoder("utf-8", { fatal: true });
     for await (const bytes of response.body) {
+      recordIbbResponseBytes(response, bytes.byteLength);
       onChunk(bytes.byteLength);
       signal?.throwIfAborted();
       let text;
