@@ -1,29 +1,12 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { AppError } from "../shared/errors.js";
 import { dateOnly } from "../history/time.js";
-import { ibbFetch, readIbbResponse } from "./ibb-fetch.js";
+import { ibbFetch } from "./ibb-fetch.js";
+import { readArchiveResponse } from "./iett-archive-parser.js";
+
+export { parseArchiveResponse } from "./iett-archive-parser.js";
 
 const SOAP_ACTION = "http://tempuri.org/GetIettArsivGorev_json";
-const parser = new XMLParser({ removeNSPrefix: true, parseTagValue: false, trimValues: false });
-
-export function parseArchiveResponse(xml) {
-  if (/<!DOCTYPE/i.test(xml) || XMLValidator.validate(xml) !== true) {
-    throw new AppError(502, "IETT_ARCHIVE_INVALID_XML", "IETT returned invalid archive XML.");
-  }
-  const body = parser.parse(xml)?.Envelope?.Body;
-  if (body?.Fault) {
-    throw new AppError(502, "IETT_ARCHIVE_SOAP_FAULT", "IETT returned an archive SOAP fault.");
-  }
-  const result = body?.GetIettArsivGorev_jsonResponse?.GetIettArsivGorev_jsonResult;
-  let records;
-  try { records = JSON.parse(result); }
-  catch { throw new AppError(502, "IETT_ARCHIVE_INVALID_JSON", "IETT returned invalid archive JSON."); }
-  if (!Array.isArray(records)) {
-    throw new AppError(502, "IETT_ARCHIVE_INVALID_JSON", "IETT archive data must be an array.");
-  }
-  return records;
-}
 
 function retryAfter(value, now) {
   if (value == null) return 0;
@@ -47,7 +30,8 @@ export class IettArchiveClient {
   fetchDay(date, { signal } = {}) {
     dateOnly(date);
     const pending = this.tail.then(() => this.#fetchDay(date, signal));
-    this.tail = pending.catch(() => {});
+    // Serialize requests without retaining the last day's records while idle.
+    this.tail = pending.then(() => {}, () => {});
     return pending;
   }
 
@@ -81,13 +65,13 @@ export class IettArchiveClient {
         body: `<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><GetIettArsivGorev_json xmlns="http://tempuri.org/"><Tarih>${date.replaceAll("-", "")}</Tarih></GetIettArsivGorev_json></soap:Body></soap:Envelope>`,
         signal: requestSignal
       });
-      const xml = await readIbbResponse(response, "text");
       if (!response.ok) {
+        await response.body?.cancel();
         throw new AppError(502, "IETT_ARCHIVE_BAD_STATUS", "IETT returned an unsuccessful archive response.", {
           status: response.status, retryAfterMs: retryAfter(response.headers.get("retry-after"), Number(this.clock()))
         });
       }
-      return parseArchiveResponse(xml);
+      return await readArchiveResponse(response, { signal: requestSignal });
     } catch (error) {
       signal?.throwIfAborted();
       if (error instanceof AppError) throw error;

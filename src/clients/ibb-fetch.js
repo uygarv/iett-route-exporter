@@ -1,5 +1,6 @@
 import { fetch as proxyFetch, ProxyAgent, Pool } from "undici";
 import { createIbbProxySource, readIbbProxySource } from "./ibb-proxy-source.js";
+import { AppError } from "../shared/errors.js";
 
 const responseFailures = new WeakMap();
 
@@ -7,9 +8,9 @@ const responseFailures = new WeakMap();
 // proxy without wrapping/buffering a potentially large archive response.
 export async function readIbbResponse(response, format) {
   try {
-    return await response[format]();
+    return await (typeof format === "function" ? format(response) : response[format]());
   } catch (error) {
-    if (!(error instanceof SyntaxError)) responseFailures.get(response)?.();
+    if (!(error instanceof SyntaxError) && !(error instanceof AppError)) responseFailures.get(response)?.();
     throw error;
   } finally {
     responseFailures.delete(response);

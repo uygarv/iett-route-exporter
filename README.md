@@ -115,6 +115,19 @@ days at 04:00 Europe/Istanbul, refreshes the last three days, and retries failed
 or empty days hourly. Requests run sequentially with a default 1,000 ms delay
 after each response. Previously collected data is retained indefinitely.
 
+Archive XML is decoded and parsed incrementally from the response stream. Only
+the JSON result and one day's parsed records are retained; the full XML document
+and an XML object tree are not built. Source fields, XML entities and CDATA are
+preserved. The request timeout still covers downloading the entire response.
+The PM2 worker's memory restart threshold is `1G`.
+
+The memory regression test imports three generated 55,532-record days with a
+256 MiB V8 heap limit and checks every record's contents:
+
+```bash
+node --test test/iett-archive-memory.test.js
+```
+
 ```bash
 curl 'http://localhost:3000/api/iett/history/19?from=2026-10-01&to=2026-10-25&limit=500'
 npm run history:status
